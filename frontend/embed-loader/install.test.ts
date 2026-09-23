@@ -59,7 +59,10 @@ describe("supportchat loader", () => {
     expect(launcher?.style.height).toBe("56px")
     expect(launcher?.style.right).toBe("24px")
     expect(launcher?.style.bottom).toBe("24px")
-    expect(launcher?.style.background).toBe("rgb(11, 35, 71)")
+    expect(launcher?.style.background).toBe("rgb(11, 11, 11)")
+    expect(launcher?.querySelector("img")?.getAttribute("src")).toBe(
+      `${WIDGET_ORIGIN}/icon-watermark.png`,
+    )
   })
 
   test("first click bootstraps once and does not persist a resume token", async () => {
