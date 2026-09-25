@@ -130,6 +130,10 @@ server {
         proxy_pass http://127.0.0.1:3000;
     }
 
+    location = /icon-watermark.png {
+        proxy_pass http://127.0.0.1:3000;
+    }
+
     location ^~ /_next/ {
         proxy_pass http://127.0.0.1:3000;
     }
