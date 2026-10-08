@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.push_subscription import PushDelivery, PushSubscription
@@ -55,6 +55,18 @@ class PushRepository:
             delete(PushSubscription).where(
                 PushSubscription.user_id == user_id, PushSubscription.endpoint == endpoint
             )
+        )
+
+    async def carry_devices_to_session(self, user: User) -> None:
+        """Keep a user's other devices valid after a logout bumped token_version.
+
+        The signing-out device unsubscribed itself first; password changes do not call this,
+        so they still revoke every device.
+        """
+        await self.session.execute(
+            update(PushSubscription)
+            .where(PushSubscription.user_id == user.id)
+            .values(token_version=user.token_version)
         )
 
     async def test(

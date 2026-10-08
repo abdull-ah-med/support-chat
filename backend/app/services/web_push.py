@@ -5,6 +5,8 @@ import json
 import os
 import struct
 import time
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit
 
 import httpx
@@ -92,11 +94,43 @@ def encrypt_payload(payload: bytes, p256dh: str, auth: str) -> bytes:
     return header + AESGCM(cek).encrypt(nonce, payload + b"\x02", None)
 
 
+# Chat alerts older than this are stale (see the worker's delivery window), so the push
+# service may queue them for an offline device exactly that long and no longer.
+PUSH_TTL_SECONDS = 900
+
+
+class PushStatus(int):
+    """HTTP status from the push service, carrying the parsed Retry-After seconds."""
+
+    retry_after: int | None
+
+    def __new__(cls, status: int, retry_after: int | None = None) -> "PushStatus":
+        value = super().__new__(cls, status)
+        value.retry_after = retry_after
+        return value
+
+
+def parse_retry_after(value: str | None) -> int | None:
+    if not value:
+        return None
+    try:
+        return max(int(value), 0)
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    return max(int((when - datetime.now(UTC)).total_seconds()), 0)
+
+
 class WebPushSender:
     def __init__(self, settings: Settings, client: httpx.AsyncClient) -> None:
         self.settings, self.client = settings, client
 
-    async def send(self, device, payload: dict) -> int:
+    async def send(self, device, payload: dict) -> PushStatus:
         endpoint = trusted_endpoint(device.endpoint)
         origin = urlsplit(endpoint)
         key = vapid_key(self.settings)
@@ -121,8 +155,10 @@ class WebPushSender:
                 "Authorization": f"vapid t={token}, k={public_key(self.settings)}",
                 "Content-Encoding": "aes128gcm",
                 "Content-Type": "application/octet-stream",
-                "TTL": "300",
-                "Urgency": "normal",
+                "TTL": str(PUSH_TTL_SECONDS),
+                "Urgency": "high",
             },
         )
-        return response.status_code
+        return PushStatus(
+            response.status_code, parse_retry_after(response.headers.get("Retry-After"))
+        )

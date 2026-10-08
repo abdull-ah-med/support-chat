@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.user import User
+from app.repositories.push_repo import PushRepository
 from app.repositories.refresh_token_repo import RefreshTokenRepository
 from app.repositories.user_repo import UserRepository
 from app.security.jwt import create_access_token
@@ -76,6 +77,7 @@ class AuthService:
         user = await self._users.get_by_id(row.user_id)
         if user is not None:
             await self._users.increment_token_version(user)
+            await PushRepository(self._session).carry_devices_to_session(user)
         await self._session.commit()
 
     async def change_password(self, user: User, current_password: str, new_password: str) -> None:

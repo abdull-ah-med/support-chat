@@ -1,5 +1,6 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
+from urllib.parse import urlsplit
 
 import httpx
 import structlog
@@ -15,6 +16,8 @@ from app.services.push_content import preview_content, push_content
 from app.services.web_push import WebPushSender, public_key
 from app.settings import get_settings
 
+MAX_ATTEMPTS = 5
+MAX_RETRY_AFTER_SECONDS = 600
 log = structlog.get_logger("push_notifications")
 _task: asyncio.Task | None = None
 
@@ -67,18 +70,48 @@ async def deliver_next(session, sender, *, now: datetime | None = None) -> bool:
         "silent": device.silent,
     }
     job.attempts += 1
+    retry_after: int | None = None
     try:
         status = await sender.send(device, payload)
-    except (httpx.HTTPError, TimeoutError):
+        retry_after = getattr(status, "retry_after", None)
+    except (httpx.HTTPError, TimeoutError, OSError) as exc:
         status = 503
-    if status in (404, 410):
+        log.info("push_send_error", job=job.id, error_class=type(exc).__name__)
+    except Exception as exc:
+        # Unsendable job (bad stored key, oversized payload...). Drop it so it cannot
+        # sit at the head of the queue and starve every other device.
+        log.warning("push_job_dropped", job=job.id, error_class=type(exc).__name__)
+        status = 400
+    outcome = _settle(job, device, status, retry_after, now)
+    log.info(
+        "push_delivery",
+        job=job.id,
+        status=int(status),
+        attempts=job.attempts,
+        outcome=outcome,
+        host=urlsplit(device.endpoint).hostname,
+    )
+    if outcome == "gone":
         await session.execute(delete(PushSubscription).where(PushSubscription.id == device.id))
-    elif 200 <= status < 300 or job.attempts >= 5 or (status < 500 and status != 429):
-        job.finished_at = now
-    else:
-        job.next_attempt_at = now + timedelta(seconds=min(30 * 2 ** (job.attempts - 1), 600))
     await session.commit()
     return True
+
+
+def _settle(job: PushDelivery, device, status: int, retry_after: int | None, now: datetime) -> str:
+    if status in (404, 410):
+        return "gone"
+    if 200 <= status < 300:
+        job.finished_at = now
+        return "delivered"
+    transient = status in (408, 429) or status >= 500
+    if not transient or job.attempts >= MAX_ATTEMPTS:
+        job.finished_at = now
+        return "dropped" if transient else "rejected"
+    delay = min(30 * 2 ** (job.attempts - 1), 600)
+    if retry_after is not None:
+        delay = max(delay, min(retry_after, MAX_RETRY_AFTER_SECONDS))
+    job.next_attempt_at = now + timedelta(seconds=delay)
+    return "retry"
 
 
 async def _allowed(session, notification: Notification | None) -> bool:
@@ -115,7 +148,10 @@ async def _loop() -> None:
 
 async def start_push_notifications() -> None:
     global _task
-    if public_key(get_settings()) and (_task is None or _task.done()):
+    if not public_key(get_settings()):
+        log.warning("push_disabled_no_vapid_key")
+        return
+    if _task is None or _task.done():
         _task = asyncio.create_task(_loop())
 
 

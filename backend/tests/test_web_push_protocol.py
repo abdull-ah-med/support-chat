@@ -62,7 +62,8 @@ def test_browser_receiver_decrypts_payload_and_verifies_vapid(monkeypatch):
     assert asyncio.run(send()) == 201
     request = captured[0]
     assert request.headers["Content-Encoding"] == "aes128gcm"
-    assert request.headers["TTL"] == "300"
+    assert request.headers["TTL"] == "900"
+    assert request.headers["Urgency"] == "high"
     node = shutil.which("node")
     assert node is not None, "Node is required for independent Web Push protocol verification"
     received = subprocess.run(
