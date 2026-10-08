@@ -99,7 +99,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             assert decoded["claims"]["sub"] == "mailto:notifications@example.com"
             assert time.time() < decoded["claims"]["exp"] <= time.time() + 86400
             assert self.headers["Content-Encoding"] == "aes128gcm"
-            assert self.headers["TTL"] == "300"
+            assert self.headers["TTL"] == "900"
             assert self.headers["Authorization"].split(", k=")[1] == self.server.application_key
             assert b"SampleSite" not in body and b"secret visitor message" not in body
             with self.server.guard:
