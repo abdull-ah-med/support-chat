@@ -175,3 +175,80 @@ test("a delayed worker acknowledgement cannot restore push after logout", async 
   await expect(syncing).rejects.toThrow("cancelled")
   expect(hasActivePush()).toBe(false)
 })
+
+const DEVICE_ID = "22222222-2222-4222-8222-000000000002"
+const SERVER_KEY = "AQID"
+
+const pushHarness = (existing: object | null) => {
+  const posts: string[] = []
+  const subscribe = vi.fn(async () => ({
+    endpoint: "https://fcm.googleapis.com/fcm/send/new",
+    options: { applicationServerKey: new Uint8Array([1, 2, 3]).buffer },
+    toJSON: () => ({ keys: { p256dh: "public", auth: "auth" } }),
+    unsubscribe: vi.fn(async () => true),
+  }))
+  vi.stubGlobal("Notification", { permission: "granted" })
+  vi.stubGlobal("PushManager", function PushManager() {
+    return null
+  })
+  const registration = {
+    active: {
+      postMessage: (_message: unknown, ports: MessagePort[]) =>
+        ports[0].postMessage({ ok: true }, []),
+    },
+    pushManager: { getSubscription: async () => existing, subscribe },
+  }
+  Object.defineProperty(navigator, "serviceWorker", {
+    configurable: true,
+    value: { getRegistration: async () => registration, register: async () => registration },
+  })
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string, init?: RequestInit) => {
+      if (String(url).endsWith("config"))
+        return Response.json({ configured: true, public_key: SERVER_KEY })
+      if (init?.method === "POST") posts.push(String(url))
+      return Response.json({ id: DEVICE_ID })
+    }),
+  )
+  return { subscribe, posts }
+}
+
+test("a subscription made with a rotated VAPID key is replaced on load", async () => {
+  const unsubscribe = vi.fn(async () => true)
+  const { subscribe, posts } = pushHarness({
+    endpoint: "https://fcm.googleapis.com/fcm/send/old",
+    options: { applicationServerKey: new Uint8Array([9, 9, 9]).buffer },
+    toJSON: () => ({ keys: { p256dh: "public", auth: "auth" } }),
+    unsubscribe,
+  })
+  expect(await syncExistingPush(false)).toBe(true)
+  expect(unsubscribe).toHaveBeenCalledOnce()
+  expect(subscribe).toHaveBeenCalledOnce()
+  expect(posts).toHaveLength(1)
+  expect(hasActivePush()).toBe(true)
+})
+
+test("a subscription the browser dropped is recreated for a device that enabled push", async () => {
+  localStorage.setItem("supportchat.push", DEVICE_ID)
+  const { subscribe, posts } = pushHarness(null)
+  expect(await syncExistingPush(false)).toBe(true)
+  expect(subscribe).toHaveBeenCalledOnce()
+  expect(posts).toHaveLength(1)
+})
+
+test("a device that never enabled push is not subscribed on load", async () => {
+  const { subscribe } = pushHarness(null)
+  expect(await syncExistingPush(false)).toBe(false)
+  expect(subscribe).not.toHaveBeenCalled()
+})
+
+test("revoked browser permission turns push off locally", async () => {
+  localStorage.setItem("supportchat.push", DEVICE_ID)
+  const { subscribe, posts } = pushHarness(null)
+  vi.stubGlobal("Notification", { permission: "denied" })
+  expect(await syncExistingPush(false)).toBe(false)
+  expect(hasActivePush()).toBe(false)
+  expect(subscribe).not.toHaveBeenCalled()
+  expect(posts).toHaveLength(0)
+})

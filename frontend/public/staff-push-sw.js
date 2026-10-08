@@ -69,29 +69,55 @@ const signalTestSound = (windows, isTest, silent) => {
   client?.postMessage({ type: "supportchat.push.test" }, [])
 }
 
+const FALLBACK = {
+  title: "SupportChat · New activity",
+  body: "Open SupportChat to view your inbox.",
+  notification_id: null,
+  conversation_id: null,
+}
+
+const resolvePayload = async (event) => {
+  const parsed = parsePayload(event)
+  const device = await readDevice().catch(() => null)
+  const payload = parsed && validPayload(parsed) ? parsed : FALLBACK
+  return { device, payload }
+}
+
+const staffWindows = async () =>
+  (await self.clients.matchAll({ type: "window", includeUncontrolled: true })).filter(staffWindow)
+
+const notificationTag = (payload, device) =>
+  payload === FALLBACK
+    ? "supportchat:activity"
+    : `supportchat:${payload.subscription_id ?? device?.subscription_id}:${payload.notification_id}`
+
+const inboxUrl = (payload) => {
+  const url = new URL("/admin/inbox", self.location.origin)
+  if (payload.conversation_id) url.searchParams.set("conversation", payload.conversation_id)
+  return url.href
+}
+
 const receivePush = async (event) => {
-  const payload = parsePayload(event)
-  const device = await readDevice()
-  if (!device || payload?.subscription_id !== device.subscription_id) return
-  if (!validPayload(payload)) return
-  const windows = (
-    await self.clients.matchAll({ type: "window", includeUncontrolled: true })
-  ).filter(staffWindow)
+  // A push event must always end in a visible notification: browsers penalise silent pushes
+  // (Chrome shows a generic notice, Safari revokes the subscription). The payload is encrypted
+  // to this browser's own subscription, so it needs no further device matching; the stored
+  // device configuration only supplies the mute preference.
+  const { device, payload } = await resolvePayload(event)
+  const windows = await staffWindows()
   for (const client of windows) client.postMessage({ type: "supportchat.push" }, [])
-  const isTest = payload.conversation_id === null
-  const tag = `supportchat:${device.subscription_id}:${payload.notification_id}`
+  const isTest = payload.conversation_id === null && payload !== FALLBACK
+  const tag = notificationTag(payload, device)
   // Retries after a worker restart cannot produce a second alert while this one is displayed.
   if ((await self.registration.getNotifications({ tag })).length > 0) return
-  const url = new URL("/admin/inbox", self.location.origin)
-  if (!isTest) url.searchParams.set("conversation", payload.conversation_id)
-  const silent = device.silent || payload.silent === true
+  const silent = (device?.silent ?? false) || payload.silent === true
   await self.registration.showNotification(payload.title, {
     body: payload.body,
     tag,
+    renotify: payload === FALLBACK,
     icon: "/icon-watermark.png",
     silent,
     actions: [{ action: "open_inbox", title: isTest ? "Open inbox" : "View chat" }],
-    data: { url: url.href },
+    data: { url: inboxUrl(payload) },
   })
   signalTestSound(windows, isTest, silent)
 }
@@ -122,10 +148,23 @@ const openChat = async (event) => {
   await self.clients.openWindow(url.href)
 }
 self.addEventListener("notificationclick", (event) => event.waitUntil(openChat(event)))
-const expireDevice = async () => {
-  await saveDevice(null)
+const resubscribe = async (event) => {
+  // The browser rotated or dropped the subscription. Recreate it with the same server key so the
+  // device keeps receiving pushes; open windows re-register the new endpoint with the backend.
+  // Without an open window the next visit does it (the old endpoint is pruned on 410).
+  try {
+    const key = event.oldSubscription?.options?.applicationServerKey
+    if (!event.newSubscription && key) {
+      await self.registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: key,
+      })
+    }
+  } catch {
+    /* A window will resubscribe on the next visit. */
+  }
   const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true })
   for (const client of windows.filter(staffWindow))
     client.postMessage({ type: "supportchat.push.expired" }, [])
 }
-self.addEventListener("pushsubscriptionchange", (event) => event.waitUntil(expireDevice()))
+self.addEventListener("pushsubscriptionchange", (event) => event.waitUntil(resubscribe(event)))

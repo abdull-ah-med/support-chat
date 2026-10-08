@@ -120,6 +120,33 @@ const loadPublicKey = async () => {
   return config.public_key
 }
 
+const sameServerKey = (device: PushSubscription, publicKey: string) => {
+  const current = device.options?.applicationServerKey
+  if (!current) return true
+  const expected = keyBytes(publicKey)
+  const actual = new Uint8Array(current)
+  return (
+    actual.length === expected.length && actual.every((byte, index) => byte === expected[index])
+  )
+}
+
+// A subscription made with an old VAPID key is rejected by the push service (403), so after a key
+// rotation it must be replaced rather than re-registered with the backend.
+const ensureDevice = async (registration: ServiceWorkerRegistration, publicKey: string) => {
+  let existing = await registration.pushManager.getSubscription()
+  if (existing && !sameServerKey(existing, publicKey)) {
+    await existing.unsubscribe()
+    existing = null
+  }
+  const device =
+    existing ??
+    (await registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: keyBytes(publicKey),
+    }))
+  return { device, created: !existing }
+}
+
 export const enablePush = async (silent: boolean) => {
   const current = ++revision
   await requestPermission()
@@ -128,13 +155,7 @@ export const enablePush = async (silent: boolean) => {
   const registration = await waitForWorker(
     await navigator.serviceWorker.register(WORKER, { scope: "/" }),
   )
-  const existing = await registration.pushManager.getSubscription()
-  const device =
-    existing ??
-    (await registration.pushManager.subscribe({
-      userVisibleOnly: true,
-      applicationServerKey: keyBytes(publicKey),
-    }))
+  const { device, created } = await ensureDevice(registration, publicKey)
   try {
     if (current !== revision) throw new Error("Push setup was cancelled.")
     await registerDevice(registration, device, silent, () => current === revision)
@@ -144,20 +165,41 @@ export const enablePush = async (silent: boolean) => {
     }
   } catch (error) {
     remember(null)
-    if (!existing) await device.unsubscribe()
+    if (created) await device.unsubscribe()
     throw error
   }
 }
 
+const optionalPublicKey = async () => {
+  try {
+    return await loadPublicKey()
+  } catch {
+    return null
+  }
+}
+
+// Runs on every staff page load: re-registers the browser subscription with the backend (keys may
+// have changed or the server may have lost it), repairs a key mismatch and recreates a
+// subscription the browser dropped while the user had push enabled.
 export const syncExistingPush = async (silent: boolean, signal?: AbortSignal) => {
   const current = revision
   if (!supportsPush()) return false
-  const registration = await navigator.serviceWorker.getRegistration("/")
-  const device = await registration?.pushManager.getSubscription()
-  if (!registration || !device) {
+  const forget = () => {
     if (current === revision && !signal?.aborted) remember(null)
     return false
   }
+  if (Notification.permission !== "granted") return forget()
+  const wanted = hasActivePush()
+  const registration =
+    (await navigator.serviceWorker.getRegistration("/")) ??
+    (wanted
+      ? await waitForWorker(await navigator.serviceWorker.register(WORKER, { scope: "/" }))
+      : undefined)
+  if (!registration) return forget()
+  const publicKey = await optionalPublicKey()
+  let device = await registration.pushManager.getSubscription()
+  if (publicKey && (wanted || device)) device = (await ensureDevice(registration, publicKey)).device
+  if (!device) return forget()
   await registerDevice(registration, device, silent, () => current === revision && !signal?.aborted)
   return true
 }

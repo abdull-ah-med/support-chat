@@ -19,6 +19,7 @@ const worker = () => {
   const stored = new Map<string, Response>()
   const shown: Array<{ title: string; options: NotificationOptions }> = []
   const opened: string[] = []
+  const subscribed: object[] = []
   const windows: Array<{
     url: string
     visibilityState: string
@@ -35,6 +36,11 @@ const worker = () => {
       },
       getNotifications: async ({ tag }: { tag: string }) =>
         shown.filter((item) => item.options.tag === tag),
+      pushManager: {
+        subscribe: async (options: object) => {
+          subscribed.push(options)
+        },
+      },
     },
     clients: {
       matchAll: async () => windows,
@@ -77,7 +83,7 @@ const worker = () => {
       data: { type: "supportchat.push.configure", config },
       ports: [{ postMessage: () => {} }],
     })
-  return { dispatch, configure, shown, opened, windows }
+  return { dispatch, configure, shown, opened, windows, subscribed }
 }
 
 test("push displays metadata and system sound without storing transcripts", async () => {
@@ -111,16 +117,55 @@ test("chat alerts offer a view-chat action and examples offer an inbox action", 
   })
 })
 
-test("muted device stays silent and a logged-out or different account never sees a stale push", async () => {
+test("muted device stays silent", async () => {
   const app = worker()
   await app.configure({ subscription_id: DEVICE, silent: true })
   await app.dispatch("push", { data: { json: () => event } })
   expect(app.shown[0]?.options.silent).toBe(true)
-  await app.configure(null)
+})
+
+test("a push always shows a notification, even if the stored device configuration is lost", async () => {
+  const app = worker()
   await app.dispatch("push", { data: { json: () => event } })
   await app.configure({ subscription_id: "33333333-3333-4333-8333-000000000003", silent: false })
-  await app.dispatch("push", { data: { json: () => event } })
+  await app.dispatch("push", { data: { json: () => ({ ...event, notification_id: 18 }) } })
+  expect(app.shown.map((item) => item.title)).toEqual(["Needs attention", "Needs attention"])
+})
+
+test("an unreadable or invalid payload still shows a generic notification", async () => {
+  const app = worker()
+  await app.dispatch("push", {
+    data: {
+      json: () => {
+        throw new SyntaxError("bad json")
+      },
+    },
+  })
+  await app.dispatch("push", { data: null })
+  await app.dispatch("push", { data: { json: () => ({ title: 5 }) } })
   expect(app.shown).toHaveLength(1)
+  expect(app.shown[0]).toMatchObject({
+    title: "SupportChat · New activity",
+    options: { data: { url: "https://staff.example/admin/inbox" } },
+  })
+})
+
+test("a dropped subscription is recreated with the same server key and windows resync", async () => {
+  const app = worker()
+  const messages: unknown[] = []
+  app.windows.push({
+    url: "https://staff.example/admin/inbox",
+    visibilityState: "visible",
+    focused: true,
+    postMessage: (message) => messages.push(message),
+  })
+  await app.dispatch("pushsubscriptionchange", {
+    oldSubscription: { options: { applicationServerKey: new Uint8Array([1, 2, 3]).buffer } },
+    newSubscription: null,
+  })
+  expect(app.subscribed).toHaveLength(1)
+  expect(app.subscribed[0]).toMatchObject({ userVisibleOnly: true })
+  expect(messages).toContainEqual({ type: "supportchat.push.expired" })
 })
 
 test("a focused inbox receives a refresh and one push alert", async () => {
