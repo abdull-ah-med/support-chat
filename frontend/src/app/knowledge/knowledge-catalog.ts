@@ -206,7 +206,11 @@ const useKnowledgePages = (sources: KbSourceRecord[]) => {
       const next = preferredKnowledgePage(visible, selectedId, target)
       if (next === undefined) {
         if (target.page)
-          toast.add({ title: "This knowledge page is no longer available", type: "warning" })
+          toast.add({
+            id: "knowledge-page-missing",
+            title: "This knowledge page is no longer available",
+            type: "warning",
+          })
         setPageDetail(null)
         return
       }

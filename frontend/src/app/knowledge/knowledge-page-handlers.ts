@@ -137,6 +137,7 @@ export const useKnowledgePageHandlers = (
             title: "This page changed during save",
             type: "warning",
             priority: "high",
+            timeout: 10000,
           })
           return true
         }
@@ -147,6 +148,7 @@ export const useKnowledgePageHandlers = (
           title: "Answer could not be saved",
           type: "error",
           priority: "high",
+          timeout: 10000,
         })
         return false
       } finally {

@@ -9,6 +9,17 @@ import { toast } from "@/components/ui/toast"
 import { applyConversationRead, applyRead, mergeFeed } from "./notification-feed"
 import { notificationTitle, type NotificationFeed, type NotificationItem } from "./types"
 
+const NEW_ACTIVITY_TOAST = "notification-new"
+// The chat the visible toast points at, so opening that chat can dismiss it.
+let toastConversation: string | null = null
+
+export const dismissStaleNotificationToast = (chatId: string | null) => {
+  if (chatId && toastConversation === chatId) {
+    toast.close(NEW_ACTIVITY_TOAST)
+    toastConversation = null
+  }
+}
+
 const announceNew = (
   next: NotificationFeed,
   previousId: number | null,
@@ -23,9 +34,14 @@ const announceNew = (
       (document.hidden || item.conversation_id !== activeConversation),
   )
   if (fresh.length === 0) return null
-  const toastId = toast.add({
+  // A hidden tab relies on the tone and browser push; stacking toasts would burst on return.
+  if (document.hidden) return fresh[0]
+  toastConversation = fresh.length === 1 ? fresh[0].conversation_id : null
+  // A stable id updates the visible toast in place instead of stacking duplicates.
+  toast.add({
+    id: NEW_ACTIVITY_TOAST,
     type: "message",
-    timeout: 6000,
+    timeout: 8000,
     title:
       fresh.length === 1
         ? notificationTitle[fresh[0].scenario]
@@ -35,7 +51,7 @@ const announceNew = (
     actionProps: {
       children: "View chat",
       onClick: async () => {
-        if (await open(fresh[0])) toast.close(toastId)
+        if (await open(fresh[0])) toast.close(NEW_ACTIVITY_TOAST)
       },
     },
   })
@@ -149,6 +165,7 @@ const useActiveConversation = (
   const setActiveConversation = useCallback(
     (chatId: string | null) => {
       activeConversation.current = chatId
+      dismissStaleNotificationToast(chatId)
       readCurrent()
     },
     [readCurrent],

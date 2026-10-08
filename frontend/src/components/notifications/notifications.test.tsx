@@ -369,6 +369,31 @@ test("new activity produces one tone and an actionable shadcn toast; history and
   expect(sounded).toHaveBeenCalledTimes(1)
 })
 
+test("repeat activity updates one toast instead of stacking duplicates", async () => {
+  enableAudio()
+  renderNotifications(<NotificationBell />)
+  await screen.findByRole("button", { name: "Notifications, 1 unread" })
+  latestId = 42
+  fireEvent(window, new Event("online"))
+  await screen.findByRole("button", { name: "View chat" })
+  latestId = 43
+  fireEvent(window, new Event("online"))
+  await waitFor(() => expect(sounded).toHaveBeenCalledTimes(2))
+  expect(screen.getAllByRole("button", { name: "View chat" })).toHaveLength(1)
+})
+
+test("a hidden tab keeps the tone but does not queue a toast for its return", async () => {
+  enableAudio()
+  renderNotifications(<NotificationBell />)
+  await screen.findByRole("button", { name: "Notifications, 1 unread" })
+  const hidden = vi.spyOn(document, "hidden", "get").mockReturnValue(true)
+  latestId = 42
+  fireEvent(window, new Event("online"))
+  await waitFor(() => expect(sounded).toHaveBeenCalledTimes(1))
+  expect(screen.queryByRole("button", { name: "View chat" })).not.toBeInTheDocument()
+  hidden.mockRestore()
+})
+
 test("the settings switch persists mute and suppresses tones while keeping toasts", async () => {
   enableAudio()
   const user = userEvent.setup()

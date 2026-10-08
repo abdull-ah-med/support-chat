@@ -46,6 +46,7 @@ export const useOpenSearchTarget = <T extends { id: string }>(
       void open(record)
     } else {
       toast.add({
+        id: "search-result-missing",
         title: "This search result is no longer available",
         description: "It may have been removed. Search again for the latest records.",
         type: "warning",
