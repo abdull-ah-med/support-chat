@@ -56,6 +56,12 @@ def sql(query, parameters=()):
         return cursor.fetchall() if cursor.description else []
 
 
+def free_port():
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        return listener.getsockname()[1]
+
+
 def make_certificate(directory):
     key = ec.generate_private_key(ec.SECP256R1())
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Notification test gateway")])

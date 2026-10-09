@@ -36,12 +36,16 @@ def _worker_redis_url(base_url: str) -> str:
     return parsed._replace(path=f"/{SERIAL_REDIS_DB - 1 - index}").geturl()
 
 
-TEST_DATABASE_URL = _worker_database_url(
+# conftest is imported twice (as `conftest` and `tests.conftest`), and DATABASE_URL is rewritten
+# below, so remember the configured base once.
+_BASE_DATABASE_URL = os.environ.setdefault(
+    "_TEST_BASE_DATABASE_URL",
     os.environ.get(
         "DATABASE_URL",
         "postgresql+asyncpg://chat:chat@127.0.0.1:55432/support_chat_test",
-    )
+    ),
 )
+TEST_DATABASE_URL = _worker_database_url(_BASE_DATABASE_URL)
 TEST_DB_NAME = TEST_DATABASE_URL.rsplit("/", 1)[-1]
 
 # Exported unconditionally so subprocess servers and helpers that read the environment at
