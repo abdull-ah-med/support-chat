@@ -2,7 +2,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.services.kb_hybrid import ChunkHit, HybridKbSearch
+from app.services.kb_hybrid import ChunkHit, HybridKbSearch, KbHits
 from app.services.kb_tokens import normalize_query, search_tokens, tokenize
 
 MAX_RESULTS = 8
@@ -22,6 +22,11 @@ class KbSearch:
         self._inner = HybridKbSearch(session)
 
     async def search(
-        self, site_id: UUID, visitor_text: str, query_vector: list[float] | None = None
-    ) -> list[ChunkHit]:
-        return await self._inner.search(site_id, visitor_text, query_vector)
+        self,
+        site_id: UUID,
+        visitor_text: str,
+        query_vector: list[float] | None = None,
+        *,
+        overview: bool = False,
+    ) -> KbHits:
+        return await self._inner.search(site_id, visitor_text, query_vector, overview=overview)

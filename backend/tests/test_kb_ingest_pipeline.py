@@ -10,13 +10,14 @@ from app.models.kb_page_job import KbPageJob
 from app.models.kb_snapshot import KbSnapshot
 from app.models.kb_source import KbSource
 from app.repositories.kb_source_repo import KbSourceRepository
-from app.services.full_context import load_live_units
-from app.services.kb_embedder import FakeEmbedder, configured_embedder_id
+from app.services.kb_embedder import configured_embedder_id
 from app.services.kb_hybrid import HybridKbSearch
 from app.services.kb_ingest import canonical_url, ingest_source
 from app.services.kb_source_admin import KbSourceService
 from app.services.kb_validate import NUMERIC_RE
 from tests.bot_fixtures import insert_site
+from tests.fakes import FakeEmbedder
+from tests.kb_corpus import load_live_units
 
 FAQ_URL = "https://sample-site.example.com/faq"
 DOT_URL = "https://sample-site.example.com/dot"
@@ -551,5 +552,7 @@ async def test_admin_sync_reingests_sampledata_fixture_pages(migrated_db) -> Non
         for query, literal in DATA_QUERIES:
             hits = await search.search(site_id, query, query_vector=None)
             assert any(literal in (hit.answer_verbatim or hit.body) for hit in hits), query
-        overview = await search.search(site_id, "what services do you offer", query_vector=None)
+        overview = await search.search(
+            site_id, "what services do you offer", query_vector=None, overview=True
+        )
         assert len(overview) >= 3

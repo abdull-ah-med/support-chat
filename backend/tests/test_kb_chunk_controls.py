@@ -6,11 +6,11 @@ from sqlalchemy import select, text
 from app.db import session_maker
 from app.models.kb_chunk import KbChunk
 from app.models.kb_page import KbPage
-from app.services.full_context import load_live_units
-from app.services.kb_embedder import FakeEmbedder
 from app.services.kb_source_admin import KbSourceService
 from app.services.site_admin import AdminError
 from tests.bot_fixtures import insert_chunk, insert_site
+from tests.fakes import FakeEmbedder
+from tests.kb_corpus import load_live_units
 
 
 async def test_page_toggle_preserves_individual_chunk_choices_and_cache_eligibility(

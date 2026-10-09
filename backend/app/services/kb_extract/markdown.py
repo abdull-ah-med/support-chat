@@ -11,6 +11,8 @@ def parse_markdown(markdown: str, url: str) -> list[EvidenceUnit]:
         return []
     units: list[EvidenceUnit] = []
     heading = ""
+    path: tuple[str, ...] = ()
+    trail: list[tuple[int, str]] = []
     parts: list[str] = []
     fence = ""
     for raw_line in markdown.splitlines():
@@ -24,18 +26,25 @@ def parse_markdown(markdown: str, url: str) -> list[EvidenceUnit]:
                 fence = ""
             parts.append(raw_line)
             continue
-        match = re.match(r"^#{1,6}\s+(.+?)(?:\s+#+)?$", line) if not fence else None
+        match = re.match(r"^(#{1,6})\s+(.+?)(?:\s+#+)?$", line) if not fence else None
         if match:
-            _flush(units, heading, parts, url)
-            heading = match.group(1)
+            _flush(units, heading, path, parts, url)
+            heading = match.group(2)
+            level = len(match.group(1))
+            while trail and trail[-1][0] >= level:
+                trail.pop()
+            trail.append((level, tidy_inline(heading)))
+            path = tuple(title for _, title in trail if title)
             parts = []
             continue
         parts.append(raw_line)
-    _flush(units, heading, parts, url)
+    _flush(units, heading, path, parts, url)
     return units
 
 
-def _flush(units: list[EvidenceUnit], heading: str, parts: list[str], url: str) -> None:
+def _flush(
+    units: list[EvidenceUnit], heading: str, path: tuple[str, ...], parts: list[str], url: str
+) -> None:
     source = "\n".join(parts)
     has_code = any(line.lstrip().startswith(("```", "~~~")) for line in parts)
     body = source.strip() if has_code else tidy_text(source)
@@ -50,5 +59,6 @@ def _flush(units: list[EvidenceUnit], heading: str, parts: list[str], url: str) 
             answer_verbatim=body,
             body_for_search=f"{title}\n{body}",
             display_locator=locator_for(url, title),
+            heading_path=path,
         )
     )

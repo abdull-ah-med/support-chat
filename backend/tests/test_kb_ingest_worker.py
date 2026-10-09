@@ -47,9 +47,10 @@ async def test_drain_continues_after_one_source_fails(migrated_db, monkeypatch) 
 
     from app.db import session_maker
     from app.models.kb_source import KbSource
-    from app.services.kb_embedder import FakeEmbedder, configured_embedder_id
+    from app.services.kb_embedder import configured_embedder_id
     from app.workers.kb_ingest_worker import _drain_queued
     from tests.bot_fixtures import insert_site
+    from tests.fakes import FakeEmbedder
 
     async with session_maker()() as session:
         site = await insert_site(session, "samplesite", "SampleSite")

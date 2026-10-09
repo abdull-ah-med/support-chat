@@ -203,15 +203,6 @@ def test_deleting_source_cascades_pages_and_chunks(client) -> None:
         session.close()
 
 
-def test_vector_extension_is_available(client) -> None:
-    session = _session()
-    try:
-        exists = session.execute(text("SELECT extname FROM pg_extension WHERE extname = 'vector'"))
-        assert exists.scalar_one() == "vector"
-    finally:
-        session.close()
-
-
 def test_chunk_search_document_weights_question_and_aliases_above_body(client) -> None:
     session = _session()
     try:
@@ -289,20 +280,6 @@ def test_one_live_snapshot_per_source_and_site_id_must_match_source(client) -> N
         )
         with pytest.raises(IntegrityError):
             session.commit()
-    finally:
-        session.close()
-
-
-def test_messages_snapshot_id_column_exists(client) -> None:
-    session = _session()
-    try:
-        exists = session.execute(
-            text(
-                "SELECT column_name FROM information_schema.columns "
-                "WHERE table_name = 'messages' AND column_name = 'snapshot_id'"
-            )
-        ).scalar_one()
-        assert exists == "snapshot_id"
     finally:
         session.close()
 

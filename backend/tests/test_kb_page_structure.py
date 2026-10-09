@@ -142,10 +142,10 @@ async def test_page_pipeline_embeds_clean_text_from_crawl_markdown(
     from app.models.kb_chunk import KbChunk
     from app.models.kb_page import KbPage
     from app.models.kb_snapshot import KbSnapshot
-    from app.services.kb_embedder import FakeEmbedder
     from app.services.kb_fetcher import FetchResult, _digest
     from app.services.kb_ingest import ingest_source
     from app.services.kb_page_structure import StructuredPage
+    from tests.fakes import FakeEmbedder
     from tests.test_kb_ingest_pipeline import FAQ_URL, _queued_source, fake_fetch
 
     crawl_text = ("navigation " * 500) + "\n\n" + SOURCE
@@ -199,10 +199,10 @@ async def test_one_invented_block_does_not_discard_the_page(migrated_db, monkeyp
     from app.db import session_maker
     from app.models.kb_chunk import KbChunk
     from app.models.kb_snapshot import KbSnapshot
-    from app.services.kb_embedder import FakeEmbedder
     from app.services.kb_fetcher import FetchResult, _digest
     from app.services.kb_ingest import ingest_source
     from app.services.kb_page_structure import StructuredPage
+    from tests.fakes import FakeEmbedder
     from tests.test_kb_ingest_pipeline import FAQ_URL, _queued_source, fake_fetch
 
     crawl_text = (

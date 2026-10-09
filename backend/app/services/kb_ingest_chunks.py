@@ -7,7 +7,7 @@ import hashlib
 import json
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import delete, distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.kb_chunk import KbChunk
@@ -134,6 +134,7 @@ def _units_payload(units: list[EvidenceUnit]) -> dict:
                 "structured_text": unit.structured_text,
                 "enabled": unit.enabled,
                 "review_note": unit.review_note,
+                "heading_path": list(unit.heading_path),
             }
             for unit in units
         ]
@@ -173,9 +174,69 @@ def _units_from_payload(payload: dict) -> list[EvidenceUnit] | None:
                 structured_text=str(row["structured_text"]) if row.get("structured_text") else None,
                 enabled=bool(row.get("enabled", True)),
                 review_note=str(row["review_note"]) if row.get("review_note") else None,
+                heading_path=tuple(
+                    str(item) for item in (row.get("heading_path") or []) if isinstance(item, str)
+                ),
             )
         )
     return units
+
+
+BOILERPLATE_MIN_PAGES = 3
+BOILERPLATE_MIN_CHARS = 40
+
+
+async def dedupe_snapshot_boilerplate(session: AsyncSession, snapshot_id: UUID) -> int:
+    """Keep one copy of a passage that a snapshot repeats verbatim on many pages.
+
+    Navigation blurbs, footers and calls to action recur on every page. One copy says
+    everything the rest do, and the rest crowd real answers out of the top hits. A
+    page is never emptied: a duplicate is kept when it is that page's only chunk.
+    """
+    answer_key = func.md5(KbChunk.answer_verbatim)
+    question_key = func.coalesce(KbChunk.canonical_question, "")
+    groups = (
+        await session.execute(
+            select(answer_key, question_key)
+            .where(
+                KbChunk.snapshot_id == snapshot_id,
+                func.length(KbChunk.answer_verbatim) >= BOILERPLATE_MIN_CHARS,
+            )
+            .group_by(answer_key, question_key)
+            .having(func.count(distinct(KbChunk.page_id)) >= BOILERPLATE_MIN_PAGES)
+        )
+    ).all()
+    if not groups:
+        return 0
+    chunks_per_page = dict(
+        (
+            await session.execute(
+                select(KbChunk.page_id, func.count())
+                .where(KbChunk.snapshot_id == snapshot_id)
+                .group_by(KbChunk.page_id)
+            )
+        ).all()
+    )
+    doomed: list[UUID] = []
+    for digest, question in groups:
+        members = (
+            await session.execute(
+                select(KbChunk.id, KbChunk.page_id)
+                .where(
+                    KbChunk.snapshot_id == snapshot_id,
+                    answer_key == digest,
+                    question_key == question,
+                )
+                .order_by(KbChunk.page_id, KbChunk.ordinal, KbChunk.id)
+            )
+        ).all()
+        for chunk_id, page_id in members[1:]:
+            if chunks_per_page[page_id] > 1:
+                chunks_per_page[page_id] -= 1
+                doomed.append(chunk_id)
+    if doomed:
+        await session.execute(delete(KbChunk).where(KbChunk.id.in_(doomed)))
+    return len(doomed)
 
 
 async def _persist_chunks(
@@ -211,7 +272,7 @@ async def _persist_chunks(
 
 
 async def _prepare_chunks(
-    units: list[EvidenceUnit], worker: Embedder
+    units: list[EvidenceUnit], worker: Embedder, page_title: str = ""
 ) -> tuple[list[TextChunk], list[list[float]], int]:
     settings = get_settings()
     pieces: list[TextChunk] = []
@@ -221,6 +282,7 @@ async def _prepare_chunks(
                 unit,
                 settings.chunk_target_chars,
                 settings.chunk_overlap_chars,
+                page_title=page_title,
             )
         )
     pieces = split_chunks_for_embed(pieces, settings.openai_embed_max_tokens)

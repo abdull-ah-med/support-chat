@@ -14,7 +14,7 @@ from app.models.kb_page import KbPage
 from app.models.kb_page_job import KbPageJob
 from app.models.kb_snapshot import KbSnapshot
 from app.models.kb_source import KbSource
-from app.services.kb_ingest_chunks import _copy_live_chunks
+from app.services.kb_ingest_chunks import _copy_live_chunks, dedupe_snapshot_boilerplate
 from app.services.kb_ingest_state import _bump_source, _record_job_event, _sync_status
 from app.services.kb_snapshot import fail, mark_unchanged, validate_snapshot
 from app.services.kb_validate import PageEvidence, ValidationResult
@@ -88,6 +88,7 @@ async def _finish_ingest(
         return
     if live is not None:
         await _copy_pending_live_chunks(session, source, live.id, snapshot_id, pending)
+    await dedupe_snapshot_boilerplate(session, snapshot_id)
     await _stage_snapshot(session, snapshot_id, pending, content_hash)
     source.stage = "validating"
     _sync_status(source)

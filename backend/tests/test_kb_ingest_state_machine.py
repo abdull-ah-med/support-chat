@@ -11,9 +11,10 @@ from app.models.kb_snapshot import KbSnapshot
 from app.models.kb_source import KbSource
 from app.repositories.kb_page_job_repo import KbPageJobRepository
 from app.services.kb_crawl import FetchError
-from app.services.kb_embedder import FakeEmbedder, configured_embedder_id
+from app.services.kb_embedder import configured_embedder_id
 from app.services.kb_ingest import ingest_source
 from tests.bot_fixtures import insert_site
+from tests.fakes import FakeEmbedder
 
 FAQ_URL = "https://sample-site.example.com/faq"
 DOT_URL = "https://sample-site.example.com/dot"

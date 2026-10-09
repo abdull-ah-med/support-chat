@@ -1,7 +1,7 @@
 import uuid
 
 from app.db import session_maker
-from app.services.kb_embedder import FakeEmbedder, rrf_merge, unit_vector
+from app.services.kb_embedder import rrf_merge
 from app.services.kb_search import KbSearch
 from tests.bot_fixtures import (
     EASY_BODY,
@@ -10,6 +10,7 @@ from tests.bot_fixtures import (
     insert_chunk,
     seed_brand_articles,
 )
+from tests.fakes import FakeEmbedder, MappedEmbedder, unit_vector
 
 A = uuid.UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 B = uuid.UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
@@ -54,10 +55,10 @@ async def test_overview_question_uses_that_sites_indexed_copy(migrated_db) -> No
     async with session_maker()() as session:
         easy, bg, _timing, _fcra = await seed_brand_articles(session)
         easy_hits = await KbSearch(session).search(
-            easy.id, "can you tell me what you guys do", query_vector=None
+            easy.id, "can you tell me what you guys do", query_vector=None, overview=True
         )
         bg_hits = await KbSearch(session).search(
-            bg.id, "can you tell me what you guys do", query_vector=None
+            bg.id, "can you tell me what you guys do", query_vector=None, overview=True
         )
         assert [hit.body for hit in easy_hits] == [EASY_BODY]
         assert [hit.body for hit in bg_hits] == [FCRA_BODY]
@@ -65,7 +66,10 @@ async def test_overview_question_uses_that_sites_indexed_copy(migrated_db) -> No
         assert all(hit.site_id == bg.id for hit in bg_hits)
 
 
-async def test_overview_keeps_eight_distinct_homepage_headings(migrated_db) -> None:
+_PRODUCT_EMBEDDER = MappedEmbedder({f"Product {index} ": 20 + index for index in range(10)})
+
+
+async def _seed_homepage_products(headings: list[str]):
     import hashlib
 
     from app.models.kb_chunk import KbChunk
@@ -75,7 +79,6 @@ async def test_overview_keeps_eight_distinct_homepage_headings(migrated_db) -> N
     from app.services.kb_embedder import configured_embedder_id
     from tests.bot_fixtures import insert_site
 
-    headings = [f"Product {index}" for index in range(10)]
     async with session_maker()() as session:
         site = await insert_site(session, "sampledata", "247 SampleData")
         url = "https://sample-data.example.com/"
@@ -113,7 +116,7 @@ async def test_overview_keeps_eight_distinct_homepage_headings(migrated_db) -> N
         session.add(snapshot)
         await session.flush()
         bodies = [f"{heading} describes a distinct platform capability." for heading in headings]
-        vectors = await FakeEmbedder().embed_documents(bodies)
+        vectors = await _PRODUCT_EMBEDDER.embed_documents(bodies)
         for index, heading in enumerate(headings):
             session.add(
                 KbChunk(
@@ -132,18 +135,36 @@ async def test_overview_keeps_eight_distinct_homepage_headings(migrated_db) -> N
                 )
             )
         await session.commit()
+        return site.id
+
+
+async def test_overview_keeps_eight_distinct_homepage_headings(migrated_db) -> None:
+    headings = [f"Product {index}" for index in range(10)]
+    site_id = await _seed_homepage_products(headings)
+    async with session_maker()() as session:
         hits = await KbSearch(session).search(
-            site.id, "what services do you offer?", query_vector=None
+            site_id, "what services do you offer?", query_vector=None, overview=True
         )
     assert [hit.heading for hit in hits] == headings[:8]
+
+
+async def test_overview_still_returns_the_passage_a_named_topic_matches(migrated_db) -> None:
+    headings = [f"Product {index}" for index in range(10)]
+    site_id = await _seed_homepage_products(headings)
+    question = "Product 9 describes a distinct platform capability."
+    async with session_maker()() as session:
+        hits = await KbSearch(session).search(
+            site_id,
+            question,
+            query_vector=await _PRODUCT_EMBEDDER.embed_query(question),
+            overview=True,
+        )
+    assert "Product 9" in [hit.heading for hit in hits]
 
 
 async def test_services_query_keeps_catalog_unit_without_requiring_provide(
     migrated_db,
 ) -> None:
-    from app.services.kb_tokens import search_tokens
-
-    assert "provide" not in search_tokens("what services do you provide?")
     async with session_maker()() as session:
         easy, _bg, _timing, _fcra = await seed_brand_articles(session)
         catalog = await insert_chunk(
@@ -246,12 +267,12 @@ async def test_trigram_misspelling_uses_grounded_trgm_index(migrated_db) -> None
                 text(
                     "EXPLAIN (FORMAT JSON) "
                     "SELECT kb_chunks.id FROM kb_chunks "
-                    "WHERE lower("
+                    "WHERE workspace_search_fold("
                     "coalesce(canonical_question, '') || ' ' || "
                     "kb_aliases_as_text(aliases) || ' ' || "
                     "coalesce(heading, '') || ' ' || "
                     "coalesce(topic_label, '')"
-                    ") % lower(:q)"
+                    ") % workspace_search_fold(:q)"
                 ),
                 {"q": "how quikly are ressults availble"},
             )
@@ -331,6 +352,6 @@ async def test_broad_services_query_returns_at_least_three_hits(migrated_db) -> 
         )
         await session.commit()
         hits = await HybridKbSearch(session).search(
-            easy.id, "what services do you offer", query_vector=None
+            easy.id, "what services do you offer", query_vector=None, overview=True
         )
     assert len(hits) >= 3

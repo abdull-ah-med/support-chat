@@ -5,12 +5,13 @@ from sqlalchemy import select
 from app.db import session_maker
 from app.models.kb_snapshot import KbSnapshot
 from app.models.kb_source import KbSource
-from app.services.full_context import load_live_units
-from app.services.kb_embedder import FakeEmbedder, configured_embedder_id
+from app.services.kb_embedder import configured_embedder_id
 from app.services.kb_ingest import ingest_source
 from app.services.kb_source_admin import KbSourceService
 from app.services.route_decision import live_snapshots_for_site
 from tests.bot_fixtures import insert_site
+from tests.fakes import FakeEmbedder
+from tests.kb_corpus import load_live_units
 
 FAQ_URL = "https://sample-site.example.com/faq"
 FAQ_HTML = (

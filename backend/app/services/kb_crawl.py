@@ -8,10 +8,11 @@ from urllib.robotparser import RobotFileParser
 import httpx
 from defusedxml import ElementTree as DefusedET
 
+from app.settings import get_settings
+
 SITEMAP_DIRECTIVE_RE = re.compile(r"(?i)^sitemap:\s*(\S+)")
 MAX_SITEMAP_NODES = 5_000
 
-USER_AGENT = "SupportChatBot/1.0"
 MAX_BYTES = 1_000_000
 TIMEOUT = 10.0
 BODY_DEADLINE = 20.0
@@ -86,7 +87,16 @@ def fetch_text(url: str, allowed_hosts: set[str], hops: int = 0) -> str:
     return _fetch(url, allowed_hosts, hops, html_only=False)
 
 
-def robots_allows(url: str, robots_body: str, user_agent: str = USER_AGENT) -> bool:
+def crawler_user_agent() -> str:
+    """The crawler's identity from settings: a product token plus an optional contact URL."""
+    settings = get_settings()
+    contact = settings.kb_crawler_contact_url.strip()
+    agent = settings.kb_crawler_user_agent
+    return f"{agent} (+{contact})" if contact else agent
+
+
+def robots_allows(url: str, robots_body: str, user_agent: str | None = None) -> bool:
+    user_agent = user_agent if user_agent is not None else crawler_user_agent()
     parser = RobotFileParser()
     parser.parse(robots_body.splitlines())
     return parser.can_fetch(user_agent, url)
@@ -139,7 +149,7 @@ def _pinned_request_url(
     pinned = urlunparse(
         (parsed.scheme, netloc, parsed.path or "/", parsed.params, parsed.query, parsed.fragment)
     )
-    headers = {"User-Agent": USER_AGENT, "Host": host}
+    headers = {"User-Agent": crawler_user_agent(), "Host": host}
     extensions = {"sni_hostname": host}
     return pinned, headers, extensions
 
@@ -184,7 +194,7 @@ def pinned_get(
         with httpx.Client(
             timeout=TIMEOUT,
             follow_redirects=False,
-            headers={"User-Agent": USER_AGENT},
+            headers={"User-Agent": crawler_user_agent()},
         ) as client:
             with client.stream("GET", pinned, headers=headers, extensions=extensions) as response:
                 if response.status_code in {301, 302, 303, 307, 308}:
@@ -214,7 +224,7 @@ def _fetch(url: str, allowed_hosts: set[str], hops: int, html_only: bool) -> str
         with httpx.Client(
             timeout=TIMEOUT,
             follow_redirects=False,
-            headers={"User-Agent": USER_AGENT},
+            headers={"User-Agent": crawler_user_agent()},
         ) as client:
             with client.stream("GET", pinned, headers=headers, extensions=extensions) as response:
                 if response.status_code in {301, 302, 303, 307, 308}:

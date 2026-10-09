@@ -63,29 +63,6 @@ def configured_embedder_id() -> str:
     return f"openai:{settings.openai_embed_model}:{settings.openai_embed_dim}"
 
 
-def unit_vector(axis: int, dim: int | None = None) -> list[float]:
-    size = get_settings().openai_embed_dim if dim is None else dim
-    vector = [0.0] * size
-    if 0 <= axis < size:
-        vector[axis] = 1.0
-    return vector
-
-
-def axis_for_text(text: str) -> int:
-    lowered = text.casefold()
-    if any(token in lowered for token in ("24-48", "how fast", "turnaround", "how long")):
-        return 0
-    if "fcra" in lowered or "fair credit" in lowered:
-        return 1
-    if any(token in lowered for token in ("pricing", "how much", "cost", "price")):
-        return 2
-    if "dot" in lowered:
-        return 3
-    if "portal" in lowered:
-        return 4
-    return 10
-
-
 def query_vector_cache_key(normalized_query: str, embedder_id: str) -> str:
     digest = sha256(f"{embedder_id}\0{normalized_query}".encode()).hexdigest()
     return f"kb:qvec:v2:{digest}"
@@ -162,24 +139,16 @@ async def _store_document_vector(text: str, embedder_id: str, vector: list[float
         return
 
 
-class FakeEmbedder:
-    embedder_id = "fake:axes"
-
-    @property
-    def dim(self) -> int:
-        return get_settings().openai_embed_dim
-
-    async def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        return [unit_vector(axis_for_text(text)) for text in texts]
-
-    async def embed_query(self, text: str) -> list[float] | None:
-        return unit_vector(axis_for_text(text))
+class EmbedderNotConfiguredError(RuntimeError):
+    """Raised when an embedding provider is required but no credential is configured."""
 
 
 class OpenAIEmbedder:
     _shared_clients: ClassVar[dict[tuple[object, object, str | None, float, int], object]] = {}
 
-    def __init__(self, api_key: str | None) -> None:
+    def __init__(self, api_key: str) -> None:
+        if not api_key or not api_key.strip():
+            raise EmbedderNotConfiguredError("OpenAIEmbedder needs a non-empty API key")
         self._api_key = api_key
 
     def _shared_client(self, *, timeout: float, max_retries: int):
@@ -260,8 +229,6 @@ class OpenAIEmbedder:
     async def embed_query(self, text: str) -> list[float] | None:
         from openai import APITimeoutError
 
-        if not self._api_key:
-            return None
         settings = get_settings()
         normalized = normalize_query(text)
         embedder_id = self.embedder_id
@@ -312,9 +279,11 @@ async def _embed_with_retry(
 
 
 def default_embedder() -> Embedder:
-    key = get_settings().openai_api_key
+    key = (get_settings().openai_api_key or "").strip()
     if not key:
-        return FakeEmbedder()
+        raise EmbedderNotConfiguredError(
+            "OPENAI_API_KEY is required: embeddings have no fallback provider"
+        )
     return OpenAIEmbedder(key)
 
 
