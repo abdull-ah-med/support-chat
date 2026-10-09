@@ -3,12 +3,19 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, status
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.db import SessionDep
 from app.models.site import Site
 from app.security.deps import CurrentAdmin, CurrentUser
-from app.services.site_admin import AdminError, SiteAdminService, build_snippet
+from app.services.site_admin import (
+    ASSISTANT_SCOPE_MAX,
+    HANDOFF_TOPICS_MAX_ITEMS,
+    LANGUAGE_MAX,
+    AdminError,
+    SiteAdminService,
+    build_snippet,
+)
 
 router = APIRouter()
 
@@ -23,6 +30,9 @@ class SiteCreateIn(BaseModel):
     origins: list[str] | None = None
     website_url: str | None = None
     contact_info: list[str] | None = None
+    assistant_scope: str | None = Field(default=None, max_length=ASSISTANT_SCOPE_MAX)
+    handoff_topics: list[str] | None = Field(default=None, max_length=HANDOFF_TOPICS_MAX_ITEMS)
+    primary_language: str | None = Field(default=None, max_length=LANGUAGE_MAX)
 
 
 class SitePatchIn(BaseModel):
@@ -34,6 +44,9 @@ class SitePatchIn(BaseModel):
     origins: list[str] | None = None
     website_url: str | None = None
     contact_info: list[str] | None = None
+    assistant_scope: str | None = Field(default=None, max_length=ASSISTANT_SCOPE_MAX)
+    handoff_topics: list[str] | None = Field(default=None, max_length=HANDOFF_TOPICS_MAX_ITEMS)
+    primary_language: str | None = Field(default=None, max_length=LANGUAGE_MAX)
     enabled: bool | None = None
     bot_enabled: bool | None = None
     human_enabled: bool | None = None
@@ -58,6 +71,9 @@ class SiteOut(BaseModel):
     widget_installed: bool | None
     widget_checked_at: datetime | None
     contact_info: list[str]
+    assistant_scope: str
+    handoff_topics: list[str]
+    primary_language: str
 
 
 class OffBrandListIn(BaseModel):
@@ -111,6 +127,9 @@ def _site_out(site: Site, widget_origin: str) -> SiteOut:
         widget_installed=site.widget_installed,
         widget_checked_at=site.widget_checked_at,
         contact_info=list(site.contact_info or []),
+        assistant_scope=site.assistant_scope or "",
+        handoff_topics=list(site.handoff_topics or []),
+        primary_language=site.primary_language or "en",
     )
 
 
@@ -135,6 +154,9 @@ async def create_site(payload: SiteCreateIn, session: SessionDep, admin: Current
             origins=payload.origins,
             website_url=payload.website_url,
             contact_info=payload.contact_info,
+            assistant_scope=payload.assistant_scope,
+            handoff_topics=payload.handoff_topics,
+            primary_language=payload.primary_language,
             admin=admin,
         )
     except AdminError as exc:
@@ -157,6 +179,9 @@ async def patch_site(
             origins=payload.origins,
             website_url=payload.website_url,
             contact_info=payload.contact_info,
+            assistant_scope=payload.assistant_scope,
+            handoff_topics=payload.handoff_topics,
+            primary_language=payload.primary_language,
             enabled=payload.enabled,
             bot_enabled=payload.bot_enabled,
             human_enabled=payload.human_enabled,

@@ -452,6 +452,116 @@ describe("sites contact info", () => {
   })
 })
 
+const stubPatch = (site: typeof SITE, capture: (body: Record<string, unknown>) => void) =>
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockImplementation(async (input: RequestInfo, init?: RequestInit) => {
+      if (
+        typeof input === "string" &&
+        input.startsWith("/api/sites/") &&
+        init?.method === "PATCH"
+      ) {
+        capture(JSON.parse(String(init.body)) as Record<string, unknown>)
+        return { ok: true, status: 200, json: async () => site }
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ items: [site], widget_origin: "http://widget.localhost:3000" }),
+      }
+    }),
+  )
+
+const openManage = async (user: ReturnType<typeof userEvent.setup>) => {
+  renderWithProviders(<SitesConsole isAdmin={true} displayName="Riley Chen" />)
+  await user.click(await screen.findByRole("button", { name: "Manage" }))
+  return screen.findByRole("dialog", { name: "Manage site" })
+}
+
+describe("sites assistant profile", () => {
+  test("pre-fills the saved scope, topics, and language", async () => {
+    stubPatch(
+      {
+        ...SITE,
+        assistant_scope: "Opening hours and returns.",
+        handoff_topics: ["refund disputes"],
+        primary_language: "pt-BR",
+      } as typeof SITE,
+      () => {},
+    )
+    const dialog = await openManage(userEvent.setup())
+    expect(within(dialog).getByLabelText("What this assistant covers")).toHaveValue(
+      "Opening hours and returns.",
+    )
+    const topics = within(dialog).getByRole("list", { name: "Hand-off topics" })
+    expect(within(topics).getByText("refund disputes")).toBeInTheDocument()
+    expect(within(dialog).getByLabelText("Language staff write in")).toHaveValue("pt-BR")
+  })
+
+  test("adds and removes hand-off topics and saves the whole profile", async () => {
+    let patchBody: Record<string, unknown> | undefined
+    stubPatch({ ...SITE, handoff_topics: ["legal threats"] } as typeof SITE, (body) => {
+      patchBody = body
+    })
+    const user = userEvent.setup()
+    const dialog = await openManage(user)
+
+    await user.type(
+      within(dialog).getByLabelText("Always hand off to a person for"),
+      "  refund   disputes {Enter}",
+    )
+    await user.type(
+      within(dialog).getByLabelText("Always hand off to a person for"),
+      "Refund disputes",
+    )
+    await user.click(within(dialog).getByRole("button", { name: "Add topic" }))
+    await user.click(within(dialog).getByRole("button", { name: "Remove legal threats" }))
+    await user.type(
+      within(dialog).getByLabelText("What this assistant covers"),
+      "Shipping and returns.",
+    )
+    await user.clear(within(dialog).getByLabelText("Language staff write in"))
+    await user.type(within(dialog).getByLabelText("Language staff write in"), "es")
+    await user.click(within(dialog).getByRole("button", { name: "Save" }))
+
+    await waitFor(() =>
+      expect(patchBody).toMatchObject({
+        assistant_scope: "Shipping and returns.",
+        handoff_topics: ["refund disputes"],
+        primary_language: "es",
+      }),
+    )
+  })
+
+  test("blocks saving an invalid language code and says why", async () => {
+    let patched = false
+    stubPatch(SITE, () => {
+      patched = true
+    })
+    const user = userEvent.setup()
+    const dialog = await openManage(user)
+
+    await user.clear(within(dialog).getByLabelText("Language staff write in"))
+    await user.type(within(dialog).getByLabelText("Language staff write in"), "english")
+    await user.click(within(dialog).getByRole("button", { name: "Save" }))
+
+    expect(await within(dialog).findByText(/Use a language code/)).toBeInTheDocument()
+    expect(within(dialog).getByLabelText("Language staff write in")).toBeInvalid()
+    expect(patched).toBe(false)
+  })
+
+  test("non-admins see the profile read-only", async () => {
+    stubPatch({ ...SITE, handoff_topics: ["refund disputes"] } as typeof SITE, () => {})
+    const user = userEvent.setup()
+    renderWithProviders(<SitesConsole isAdmin={false} displayName="Riley Chen" />)
+    await user.click(await screen.findByRole("button", { name: "Manage" }))
+    const dialog = await screen.findByRole("dialog", { name: "Manage site" })
+    expect(within(dialog).getByLabelText("What this assistant covers")).toBeDisabled()
+    expect(within(dialog).queryByRole("button", { name: "Add topic" })).not.toBeInTheDocument()
+    expect(within(dialog).queryByRole("button", { name: /Remove/ })).not.toBeInTheDocument()
+  })
+})
+
 describe("sites leave guard", () => {
   beforeEach(() => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(mockListFetch()))

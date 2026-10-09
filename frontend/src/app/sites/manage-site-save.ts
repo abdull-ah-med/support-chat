@@ -5,6 +5,8 @@ import {
   canonicalizeOriginLines,
 } from "@/lib/validation"
 
+import { assistantPayload, type AssistantProfile } from "./assistant-profile"
+
 const linesFromText = (text: string) =>
   text
     .split("\n")
@@ -21,6 +23,7 @@ export const saveManageSite = async (
     originsText: string
     contactInfoText: string
     windowHours: number
+    profile: AssistantProfile
   },
   onSaved: (site: SiteRecord) => void,
   onError: (message: string | null) => void,
@@ -33,6 +36,7 @@ export const saveManageSite = async (
     website_url: canonicalizeHttpsUrl(payload.websiteUrl) ?? payload.websiteUrl,
     contact_info: linesFromText(payload.contactInfoText),
     callback_window_hours: payload.windowHours,
+    ...assistantPayload(payload.profile),
   })
   if (!response.ok) {
     onError("Check the origin list. Paths, wildcards, and credentials are not allowed.")

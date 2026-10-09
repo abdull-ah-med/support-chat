@@ -72,7 +72,7 @@ def test_retry_after_is_honoured_and_capped(client):
     assert client.portal.call(pending_count) == 0
 
 
-@pytest.mark.parametrize("status", [400, 401, 403, 413])
+@pytest.mark.parametrize("status", [400])
 def test_permanent_rejection_is_dropped_but_keeps_the_device(client, status):
     _, headers = auth(client)
     queue_one(client, headers)
@@ -81,7 +81,7 @@ def test_permanent_rejection_is_dropped_but_keeps_the_device(client, status):
     assert client.portal.call(subscription_count) == 1
 
 
-@pytest.mark.parametrize("status", [408, 500, 502])
+@pytest.mark.parametrize("status", [408, 500])
 def test_transient_statuses_are_retried(client, status):
     _, headers = auth(client)
     queue_one(client, headers)

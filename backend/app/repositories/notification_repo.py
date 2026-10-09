@@ -127,13 +127,19 @@ class NotificationRepository:
                 .on_conflict_do_nothing(constraint="uq_push_delivery_event")
             )
 
-    async def list_for_user(self, user_id: UUID, cursor: int | None, unread: bool) -> dict:
+    async def list_for_user(
+        self, user_id: UUID, cursor: int | None, unread: bool, site_id: UUID | None = None
+    ) -> dict:
         active = select(Conversation.id).where(Conversation.state != "closed")
         visible = [
             Notification.user_id == user_id,
             Notification.in_app.is_(True),
             Notification.conversation_id.in_(active),
         ]
+        latest_filters = [Notification.user_id == user_id]
+        if site_id is not None:
+            visible.append(Notification.site_id == site_id)
+            latest_filters.append(Notification.site_id == site_id)
         filters = list(visible)
         if unread:
             filters.append(Notification.read_at.is_(None))
@@ -174,7 +180,7 @@ class NotificationRepository:
         ).all()
         return {
             "latest_id": await self.session.scalar(
-                select(func.max(Notification.id)).where(Notification.user_id == user_id)
+                select(func.max(Notification.id)).where(*latest_filters)
             ),
             "unread_conversations": {str(chat_id): count for chat_id, _, _, count in unread_rows},
             "unread_conversation_context": {

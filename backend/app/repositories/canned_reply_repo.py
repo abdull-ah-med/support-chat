@@ -81,21 +81,16 @@ class CannedReplyRepository:
         return list(result.scalars().all())
 
     async def list_bot_eligible(self, site_id: UUID) -> list[CannedReply]:
+        """Replies the bot may send for this website. General (all-sites) replies are staff
+        shortcuts only: a bot reply must be wording this website's staff wrote or imported."""
         result = await self._session.execute(
             select(CannedReply).where(
                 CannedReply.enabled.is_(True),
                 CannedReply.bot_eligible.is_(True),
-                CannedReply.site_id.is_(None) | (CannedReply.site_id == site_id),
+                CannedReply.site_id == site_id,
             )
         )
-        rows = list(result.scalars().all())
-        site_shortcuts = {row.shortcut for row in rows if row.site_id == site_id}
-        return [
-            row
-            for row in rows
-            if row.site_id == site_id
-            or (row.site_id is None and row.shortcut not in site_shortcuts)
-        ]
+        return list(result.scalars().all())
 
     async def closest_to(
         self, site_id: UUID, embedder_id: str, vector: list[float]

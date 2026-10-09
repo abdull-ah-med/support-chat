@@ -84,9 +84,10 @@ async def feed(
     staff: CurrentUser,
     cursor: Annotated[int | None, Query(gt=0)] = None,
     unread: bool = False,
+    site_id: Annotated[UUID | None, Query()] = None,
 ) -> FeedOut:
     return FeedOut.model_validate(
-        await NotificationRepository(session).list_for_user(staff.id, cursor, unread)
+        await NotificationRepository(session).list_for_user(staff.id, cursor, unread, site_id)
     )
 
 

@@ -170,47 +170,78 @@ async def test_bot_on_human_off_scope_clarification_does_not_create_callback(
     assert message_count(conversation_id, role="system", body=WAITING_LINE) == 0
 
 
-async def test_specialist_request_stays_bot_when_human_on(migrated_db) -> None:
-    responder = RecordingResponder()
+async def test_specialist_request_queues_live_when_human_on(migrated_db) -> None:
+    responder = RecordingResponder(
+        understand={"intent": "handoff_request", "reply": "Bringing someone in."}
+    )
     async with session_maker()() as session:
         easy, _bg, _timing, _fcra = await seed_brand_articles(session)
         visitor, conversation = await insert_bot_conversation(session, easy)
         await session.commit()
         service = ConversationService(session, responder=responder, embedder=RaisingEmbedder())
         result = await service.visitor_message(
-            conversation.id,
-            visitor.id,
-            HOST_ORIGIN,
-            uuid.uuid4(),
-            "I want a specialist",
+            conversation.id, visitor.id, HOST_ORIGIN, uuid.uuid4(), "I want a specialist"
         )
+        assert result.generation_id is not None
+        await service.run_bot_turn(conversation.id, result.generation_id)
         conversation_id = conversation.id
 
-    assert result.generation_id is None
     assert conversation_state(conversation_id) == "queued"
+    assert message_count(conversation_id, role="bot", body="Bringing someone in.") == 1
     assert message_count(conversation_id, role="system", body=WAITING_LINE) == 1
     assert message_count(conversation_id, role="system", body=CALLBACK_LINE) == 0
+    assert responder.draft_calls() == []
 
 
 async def test_ssn_never_embeds(migrated_db) -> None:
+    responder = RecordingResponder(
+        understand={
+            "intent": "shared_identifiers",
+            "reply": "Please don't share personal identifiers here.",
+        }
+    )
     async with session_maker()() as session:
         easy, _bg, _timing, _fcra = await seed_brand_articles(session)
         visitor, conversation = await insert_bot_conversation(session, easy)
         await session.commit()
-        service = ConversationService(
-            session, responder=RaisingResponder(), embedder=RaisingEmbedder()
-        )
+        service = ConversationService(session, responder=responder, embedder=RaisingEmbedder())
         result = await service.visitor_message(
-            conversation.id,
-            visitor.id,
-            HOST_ORIGIN,
-            uuid.uuid4(),
-            "My SSN is 123-45-6789",
+            conversation.id, visitor.id, HOST_ORIGIN, uuid.uuid4(), "My SSN is 123-45-6789"
         )
+        assert result.generation_id is not None
+        await service.run_bot_turn(conversation.id, result.generation_id)
         conversation_id = conversation.id
-    assert result.generation_id is None
     assert conversation_state(conversation_id) == "bot"
-    assert message_count(conversation_id, role="system", body=FALLBACK) == 1
+    assert (
+        message_count(
+            conversation_id, role="bot", body="Please don't share personal identifiers here."
+        )
+        == 1
+    )
+    assert responder.draft_calls() == []
+
+
+async def test_identifier_in_a_search_query_is_masked_before_it_is_embedded(migrated_db) -> None:
+    seen: list[str] = []
+
+    class RecordingEmbedder(RaisingEmbedder):
+        async def embed_query(self, text):
+            seen.append(text)
+            return None
+
+    # A model that copies the raw message into its query must still not leak the number.
+    responder = RecordingResponder(understand={"query": "status for 123-45-6789"})
+    async with session_maker()() as session:
+        easy, _bg, _timing, _fcra = await seed_brand_articles(session)
+        visitor, conversation = await insert_bot_conversation(session, easy)
+        await session.commit()
+        service = ConversationService(session, responder=responder, embedder=RecordingEmbedder())
+        result = await service.visitor_message(
+            conversation.id, visitor.id, HOST_ORIGIN, uuid.uuid4(), "status for 123-45-6789"
+        )
+        await service.run_bot_turn(conversation.id, result.generation_id)
+
+    assert all("123-45-6789" not in text for text in seen)
 
 
 async def test_patch_human_on_while_bot_off_is_422(client: TestClient) -> None:

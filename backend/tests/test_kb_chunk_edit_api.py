@@ -10,7 +10,8 @@ from app.models.kb_source import KbSource
 from app.models.site import Site
 from app.models.user import User
 from app.security.passwords import hash_password
-from app.services.kb_embedder import FakeEmbedder, configured_embedder_id
+from app.services.kb_embedder import configured_embedder_id
+from tests.fakes import FakeEmbedder
 from tests.ws_helpers import login_staff, sync_session
 
 ADMIN_EMAIL = "admin@example.local"

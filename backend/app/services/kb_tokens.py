@@ -1,172 +1,66 @@
-import re
+"""Language-neutral text normalisation shared by retrieval and the database.
 
-STOP_WORDS = frozenset(
-    {
-        "a",
-        "an",
-        "the",
-        "is",
-        "are",
-        "am",
-        "was",
-        "were",
-        "be",
-        "how",
-        "what",
-        "when",
-        "where",
-        "why",
-        "who",
-        "of",
-        "to",
-        "in",
-        "for",
-        "on",
-        "with",
-        "at",
-        "by",
-        "from",
-        "as",
-        "or",
-        "and",
-        "do",
-        "does",
-        "did",
-        "our",
-        "your",
-        "this",
-        "that",
-        "it",
-        "i",
-        "we",
-        "you",
-        "my",
-        "us",
-        "they",
-        "them",
-        "their",
-        "will",
-        "would",
-        "should",
-        "could",
-        "have",
-        "has",
-        "had",
-        "been",
-        "provide",
-        "provides",
-        "providing",
-        "help",
-        "need",
-        "please",
-        "tell",
-        "give",
-        "list",
-        "looking",
-        "can",
-        "me",
-        "offer",
-        "offering",
-        "offers",
-    }
-)
-ALIASES = {
-    "fast": "turnaround",
-    "quick": "turnaround",
-    "quickly": "turnaround",
-    "result": "result",
-    "results": "result",
-    "employer": "employer",
-    "employers": "employer",
-    "clinic": "clinic",
-    "clinics": "clinic",
-    "location": "location",
-    "locations": "location",
-    "cost": "pricing",
-    "costs": "pricing",
-    "price": "pricing",
-    "prices": "pricing",
-    "interpret": "interpretation",
-    "interpreting": "interpretation",
-    "interpreted": "interpretation",
-}
-OVERVIEW_HINTS = (
-    "what you guys do",
-    "what do you guys do",
-    "what do you do",
-    "what you do",
-    "who are you",
-    "tell me about your company",
-    "tell me about this company",
-    "your services",
-    "what services",
-    "what does your company",
-    "what does this company",
-)
-GENERIC_NOISE = frozenset(
-    {
-        "hour",
-        "hours",
-        "day",
-        "days",
-        "minute",
-        "minutes",
-    }
-)
-WEAK_OVERLAP = frozenset(
-    {
-        "drug",
-        "drugs",
-        "test",
-        "testing",
-        "screen",
-        "screening",
-        "result",
-        "compliance",
-        "report",
-    }
-)
-TOKEN_RE = re.compile(r"[a-z0-9]+")
+Nothing here knows a language, a product, or a site. Tokens are Unicode word runs
+folded the same way PostgreSQL folds them (see ``workspace_search_fold``), so a query
+written without accents matches stored text with accents and the other way round.
+"""
+
+from __future__ import annotations
+
+import re
+import unicodedata
+from collections.abc import Sequence
+
+_WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
+_COMBINING_MARKS_RE = re.compile("[̀-ͯ]")
+_MIN_ASCII_TOKEN = 2
+# Query tokens at least this long also match longer words that share their leading
+# letters (language-neutral stand-in for stemming: result / results / resulting).
+PREFIX_MIN_TOKEN = 5
+PREFIX_TRIM = 2
+PREFIX_MIN_STEM = 4
 
 
 def normalize_query(value: str) -> str:
-    return " ".join(value.casefold().split())
+    """Stable cache/identity key: NFKC, case-folded, single-spaced."""
+    return " ".join(unicodedata.normalize("NFKC", value or "").casefold().split())
 
 
-def _rewrite_phrases(value: str) -> str:
-    return (
-        normalize_query(value)
-        .replace("how long", "turnaround")
-        .replace("how much", "pricing")
-        .replace("pending charges", "interpretation")
-        .replace("pending charge", "interpretation")
-        .replace("set up", "setup")
-        .replace("sign up", "setup")
-    )
+def fold_text(value: str) -> str:
+    """Mirror of the SQL function ``workspace_search_fold`` (NFKD, no marks, lower)."""
+    decomposed = unicodedata.normalize("NFKD", value or "")
+    return _COMBINING_MARKS_RE.sub("", decomposed).lower()
 
 
 def tokenize(value: str) -> list[str]:
-    tokens: list[str] = []
-    for raw in TOKEN_RE.findall(_rewrite_phrases(value)):
-        if raw in STOP_WORDS or len(raw) < 2:
-            continue
-        tokens.append(ALIASES.get(raw, raw))
-    return tokens
+    """Folded Unicode word tokens in order. Single ASCII characters carry no signal."""
+    return [
+        token
+        for token in _WORD_RE.findall(fold_text(value))
+        if len(token) >= _MIN_ASCII_TOKEN or not token.isascii()
+    ]
 
 
 def search_tokens(value: str) -> list[str]:
-    tokens: list[str] = []
-    seen: set[str] = set()
-    for raw in TOKEN_RE.findall(_rewrite_phrases(value)):
-        if raw in STOP_WORDS or len(raw) < 2:
-            continue
-        for token in (raw, ALIASES.get(raw, raw)):
-            if token not in seen:
-                seen.add(token)
-                tokens.append(token)
-    return tokens
+    """Distinct tokens, first occurrence order, for building a text-search query."""
+    return list(dict.fromkeys(tokenize(value)))
 
 
-def is_overview_query(value: str) -> bool:
-    text = normalize_query(value)
-    return any(hint in text for hint in OVERVIEW_HINTS)
+def token_key(value: str) -> str:
+    """Punctuation-, case- and accent-insensitive identity of a phrase."""
+    return " ".join(_WORD_RE.findall(fold_text(value)))
+
+
+def tsquery_text(tokens: Sequence[str], joiner: str) -> str:
+    """Text for ``to_tsquery('simple', ...)``: tokens joined by ``|`` or ``&``.
+
+    Tokens come from :func:`tokenize`, so they hold only letters and digits and cannot
+    carry tsquery operators. Longer tokens match by prefix.
+    """
+    terms: list[str] = []
+    for token in tokens:
+        if len(token) >= PREFIX_MIN_TOKEN:
+            terms.append(f"{token[: max(PREFIX_MIN_STEM, len(token) - PREFIX_TRIM)]}:*")
+        else:
+            terms.append(token)
+    return f" {joiner} ".join(terms)

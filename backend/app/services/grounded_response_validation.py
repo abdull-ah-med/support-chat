@@ -1,9 +1,15 @@
-"""Validate grounded drafts against live evidence before they become chat rows."""
-# ruff: noqa: RUF001
+"""Structural validation of grounded drafts against live evidence.
 
+Everything here is language- and domain-neutral: offsets, source text, site membership, digit
+sequences and PII shapes. Whether a claim is supported or answers the question is judged by
+the assessor model, not by word lists.
+"""
+
+# ruff: noqa: RUF001
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import replace
 
 import structlog
@@ -11,7 +17,6 @@ import structlog
 from app.llm.prompts import document_body
 from app.llm.safety_markers import OUTPUT_PII_PATTERNS
 from app.services import output_validator
-from app.services.faq_fastpath import is_marketing_cta
 from app.services.grounded_response_types import (
     Citation,
     DraftValidation,
@@ -20,146 +25,46 @@ from app.services.grounded_response_types import (
     TurnContext,
 )
 from app.services.pii_redactor import redact_evidence
+from app.settings import get_settings
 
 log = structlog.get_logger("grounded_response")
 
-
-_NUMERIC_CLAIM_RE = re.compile(
-    r"\$\d+(?:\.\d{1,2})?|\b\d+(?:[-–]\d+)?\s*"
-    r"(?:hours?|days?|minutes?|business days?)|\b\d+(?:\.\d+)?%",
-    re.I,
-)
-_REGULATED_RE = re.compile(r"\b(?:DOT|USDOT|FMCSA|FCRA|HIPAA|49\s+CFR\s+Part\s+40)\b", re.I)
-_MAX_CHARS = 1500
-_KEEPABLE_GAPS = frozenset(
-    {
-        "yes",
-        "sí",
-        "no",
-        "and",
-        "also",
-        "including",
-        "these include",
-        "our services include",
-        "specifically",
-        "in particular",
-        "here is how it works",
-        "here's how it works",
-        "you can also",
-        "and we also work with",
-    }
-)
-_SOFT_WORD_CAP = 120
-_COURTESY_EDGE_RE = re.compile(
-    r"^(?:"
-    r"happy to help(?: you(?: today)?)?"
-    r"|glad (?:to help|i could help)"
-    r"|i(?:['’]m| am) happy to help"
-    r"|i(?:['’]d| would) be happy to help"
-    r"|sure(?: thing)?"
-    r"|of course"
-    r"|absolutely"
-    r"|certainly"
-    r"|great(?: question)?"
-    r"|good question"
-    r"|thanks(?: for (?:asking|reaching out))?"
-    r"|thank you"
-    r"|you(?:['’]re| are) welcome"
-    r"|let me know if you (?:need|have) (?:anything(?: else)?|questions?)"
-    r"|hope (?:that|this) helps"
-    r")[.!]*$",
-    re.I,
-)
-_LIMITATION_RE = re.compile(
-    r"^(?:(?:however|but|unfortunately),?\s+|to (?:discuss|confirm|understand) [^.!?]{1,140},\s+)?(?:"
-    r"(?:i|we) (?:cannot|can't|can not|don't|do not|am unable to|are unable to) "
-    r"(?:confirm|guarantee|verify|promise|provide|access|retrieve|determine|estimate)\b"
-    r"|(?:a|our) specialist (?:can|needs to|must|would need to|will need to|should) "
-    r"(?:confirm|verify|help|review|discuss|provide)\b"
-    r"|(?:no puedo|no podemos) (?:confirmar|garantizar|verificar|determinar|proporcionar)\b"
-    r"|(?:un|nuestro) especialista (?:debe|necesita|tiene que) "
-    r"(?:confirmar|verificar|revisar|proporcionar)\b)",
-    re.I,
-)
-
-
-_UNPERFORMED_BOOKING_RE = re.compile(
-    r"^(?:I (?:have not|haven't|haven’t) (?:booked|reserved|scheduled) (?:an|any) appointment"
-    r"(?: for you)?(?: yet)?"
-    r"|No he (?:reservado|programado) (?:ninguna|una) cita(?: para usted)?)[.!]?$",
-    re.I,
-)
-
-# Mentioning a guarantee in a limitation or a request to ask about one is
-# not an affirmative business promise. Other commitment terms stay literal.
-_NON_ASSERTED_GUARANTEE_RE = re.compile(
-    r"(?:\b(?:i|we) (?:cannot|can't|do not|don't) confirm\b[^,;.!?]{0,90}"
-    r"|\b(?:ask|inquire|enquire) about\b[^,;.!?]{0,50})$",
-    re.I,
-)
+# Sentence ends: Latin, CJK and Arabic terminators, or the end of the text.
+_SENTENCE_RE = re.compile(r"\S.*?(?:[.!?。！？؟](?=\s|$)|[。！？]|$)", re.S)
+_DIGIT_RUN_RE = re.compile(r"\d+")
+_GROUPING_RE = re.compile(r"(?<=\d)[,.  ](?=\d{3}(?!\d))")
 
 
 def sentence_spans(body: str) -> list[re.Match[str]]:
-    return list(re.finditer(r"\S.*?(?:[.!?](?=\s|$)|$)", body, re.S))
+    return list(_SENTENCE_RE.finditer(body))
 
 
-def _numbers_are_verbatim(body: str, cited_text: str) -> bool:
-    source = " ".join(cited_text.casefold().split())
-    return all(
-        " ".join(token.casefold().split()) in source for token in _NUMERIC_CLAIM_RE.findall(body)
+def _ascii_digits(text: str) -> str:
+    return "".join(
+        str(unicodedata.decimal(char)) if char.isdecimal() else char for char in text or ""
     )
 
 
-def _regulated_literals_are_verbatim(body: str, cited_text: str) -> bool:
-    source = " ".join(cited_text.casefold().split())
-    return all(
-        " ".join(token.casefold().split()) in source for token in _REGULATED_RE.findall(body)
-    )
+def digit_runs(text: str) -> set[str]:
+    """Digit sequences in any script, thousands grouping removed ("1,000" == "1.000" == "1000")."""
+    canonical = _GROUPING_RE.sub("", _ascii_digits(text))
+    return set(_DIGIT_RUN_RE.findall(canonical))
 
 
-def _is_clarifying_only(body: str) -> bool:
-    text = (body or "").strip()
-    if not text.endswith("?"):
-        return False
-    # Single sentence: no internal sentence terminators before the final '?'.
-    without_final = text[:-1].rstrip()
-    if re.search(r"[.!?]", without_final):
-        return False
-    if _NUMERIC_CLAIM_RE.search(text) or _REGULATED_RE.search(text):
-        return False
-    return True
-
-
-def _is_visitor_recap(body: str, prior_messages: tuple[dict[str, str], ...]) -> bool:
-    match = re.fullmatch(
-        r'You (?:said|told me|originally said):\s*["“](.+)["”][.!]?', body.strip(), re.S | re.I
-    )
-    if not match:
-        return False
-    quote = " ".join(match.group(1).split())
-    return any(
-        quote in " ".join((message.get("content") or "").split())
-        for message in prior_messages
-        if message.get("role") == "user"
-    )
+def numbers_are_supported(body: str, *sources: str) -> bool:
+    """Every digit sequence in the answer occurs in the cited text or the visitor's own words."""
+    allowed: set[str] = set()
+    for source in sources:
+        allowed |= digit_runs(source)
+    return digit_runs(body) <= allowed
 
 
 def _normalize_copy(value: str) -> str:
     return " ".join((value or "").casefold().split())
 
 
-def _is_disallowed_source_copy(
-    body: str, units: list[EvidenceUnit], citations: list[Citation]
-) -> bool:
-    norm = _normalize_copy(body)
-    exact_units = {
-        unit.id
-        for unit in units
-        if unit.answer_verbatim and _normalize_copy(unit.answer_verbatim) == norm
-    }
-    if exact_units:
-        return not citations
-
+def _is_disallowed_source_copy(body: str, units: list[EvidenceUnit]) -> bool:
+    """A reply that is nothing but pasted passages (two or more) is a list, not an answer."""
     verbatim = {_normalize_copy(unit.answer_verbatim) for unit in units if unit.answer_verbatim}
     verbatim.discard("")
     if not verbatim:
@@ -170,34 +75,12 @@ def _is_disallowed_source_copy(
     return all(_normalize_copy(fragment) in verbatim for fragment in fragments)
 
 
-def _is_courtesy_edge(text: str) -> bool:
-    compact = " ".join((text or "").split())
-    if not compact:
-        return True
-    return bool(_COURTESY_EDGE_RE.fullmatch(compact))
-
-
-def _is_keepable_gap(text: str) -> bool:
-    stripped = (text or "").strip().lstrip(".!:;, ")
-    if not re.search(r"\w", stripped):
-        return True
-    connective = " ".join(stripped.casefold().split()).strip(".!:;, ")
-    if connective in _KEEPABLE_GAPS:
-        return True
-    return bool(
-        _is_courtesy_edge(stripped)
-        or _is_clarifying_only(stripped)
-        or _LIMITATION_RE.search(stripped)
-        or _UNPERFORMED_BOOKING_RE.fullmatch(stripped)
-    )
-
-
-def uncited_factual_sentences(draft: ModelDraft) -> list[str]:
-    """The same sentence coverage used for validation and actionable repair feedback."""
+def uncovered_sentences(draft: ModelDraft) -> list[str]:
+    """Sentences no citation overlaps. Structural only: the assessor decides what they mean."""
     return [
         sentence.group().strip()
         for sentence in sentence_spans(draft.body.strip())
-        if not _is_keepable_gap(sentence.group())
+        if re.search(r"\w", sentence.group())
         and not any(
             citation.response_start < sentence.end() and citation.response_end > sentence.start()
             for citation in draft.citations
@@ -276,38 +159,15 @@ def attribute_contact_literals(draft: ModelDraft, units: list[EvidenceUnit]) -> 
     return ModelDraft(draft.body, citations, draft.request_id)
 
 
-def focus_unknown_contact(draft: ModelDraft, units: list[EvidenceUnit]) -> ModelDraft:
-    """Keep a leading honest limitation and one verified route, without sales filler.
-
-    This narrow failure path adds no company claims: the limitation remains model
-    authored and the contact must occur literally in both the draft and evidence.
-    The returned draft still needs normal validation and semantic assessment.
-    """
-    sentences = sentence_spans(draft.body)
-    if not sentences:
-        return draft
-    limitation = sentences[0].group().strip()
-    if not _LIMITATION_RE.search(limitation) or not re.match(
-        r"^(?:I |We |No puedo |No podemos )", limitation, re.I
-    ):
-        return draft
-    sources = [redact_evidence(document_body(unit)) for unit in units]
-    matches = sorted(
-        (match for pattern in OUTPUT_PII_PATTERNS[-2:] for match in pattern.finditer(draft.body)),
-        key=lambda match: match.start(),
-    )
-    for match in matches:
-        contact = match.group()
-        if any(contact in source for source in sources):
-            route = (
-                f"Puede contactarnos en {contact}."
-                if limitation.casefold().startswith("no ")
-                else f"You can contact us at {contact}."
-            )
-            return attribute_contact_literals(
-                ModelDraft(f"{limitation}\n\n{route}", [], draft.request_id), units
-            )
-    return draft
+def _visitor_words(turn: TurnContext) -> list[str]:
+    return [
+        turn.visitor_text,
+        *(
+            message.get("content") or ""
+            for message in turn.prior_messages
+            if message.get("role") == "user"
+        ),
+    ]
 
 
 def validate_draft(  # noqa: C901
@@ -319,8 +179,6 @@ def validate_draft(  # noqa: C901
     citations = list(draft.citations)
     if not body:
         return _reject("empty", draft)
-    if is_marketing_cta(body):
-        return _reject("non_actionable_cta", draft)
 
     allowed = {unit.id: unit for unit in units}
     cited_parts: list[str] = []
@@ -334,8 +192,7 @@ def validate_draft(  # noqa: C901
             return _reject("response_offset", draft)
         if citation.response_start >= citation.response_end:
             return _reject("response_offset", draft)
-        # Native documents include the source heading. Legacy providers may
-        # cite the original answer body; both must quote actual source text.
+        # Native documents include the source heading. Both forms must quote actual source text.
         sources = [
             redact_evidence(document_body(unit)),
             redact_evidence(unit.answer_verbatim),
@@ -353,57 +210,29 @@ def validate_draft(  # noqa: C901
             return _reject("source_metadata_mismatch", draft)
         cited_parts.append(citation.cited_text)
 
-    if len(body) > _MAX_CHARS:
+    # Length is bounded by characters only; word counts are not a safe proxy across languages.
+    max_chars = get_settings().max_bot_answer_chars
+    if len(body) > max_chars:
         return _reject("over_length", draft)
-    if len(body.split()) > _SOFT_WORD_CAP:
-        return _reject("over_words", draft)
-    if _is_disallowed_source_copy(body, units, citations):
+    if _is_disallowed_source_copy(body, units):
         return _reject("source_copy", draft)
-    clarifying = _is_clarifying_only(body)
-    visitor_recap = _is_visitor_recap(body, turn.prior_messages)
+    # Any answer about the company needs at least one citation. Which sentences need one,
+    # and whether the cited span really supports them, is the assessor's judgement.
+    if not citations:
+        return _reject("no_citation", draft)
 
     cited_text = "\n".join(cited_parts)
-
-    if not clarifying and not visitor_recap:
-        if uncited_factual_sentences(draft):
-            return _reject("uncited_response_text", draft)
-        for sentence in sentence_spans(body):
-            text = sentence.group().strip()
-            if _is_keepable_gap(text):
-                continue
-            attached = [
-                item
-                for item in citations
-                if item.response_start < sentence.end() and item.response_end > sentence.start()
-            ]
-            # Citation text blocks may cover a clause, but attribution is
-            # at the sentence level. Commitments still need literal backing.
-            proof = " ".join(item.cited_text.casefold() for item in attached)
-            for match in re.finditer(
-                r"\b(?:free|guarantee(?:d)?|unlimited|certified|accredited|licensed)\b",
-                text,
-                re.I,
-            ):
-                term = match.group()
-                if term.casefold().startswith("guarantee") and _NON_ASSERTED_GUARANTEE_RE.search(
-                    text[: match.start()]
-                ):
-                    continue
-                if not re.search(rf"\b{re.escape(term.casefold())}\b", proof):
-                    return _reject("unsupported_commitment", draft)
-
-    # Inability to confirm a requested percentage or regulation is not a
-    # numeric promise or regulatory claim. Apply literal backing to the
-    # same factual sentences that require citations, not to gap guidance.
-    factual_text = "\n".join(
-        sentence.group()
-        for sentence in sentence_spans(body)
-        if not _is_keepable_gap(sentence.group())
-    )
-    if not _numbers_are_verbatim(factual_text, cited_text):
+    # A name such as "247 SampleSite" sits in the title of the page the answer cites; its digits
+    # are shown to the model with the passage, so repeating them is not an invented number.
+    cited_labels = [
+        label
+        for chunk_id in dict.fromkeys(citation.chunk_id for citation in citations)
+        for label in (allowed[chunk_id].source_title, allowed[chunk_id].source_heading)
+    ]
+    if not numbers_are_supported(
+        body, cited_text, *cited_labels, turn.site_name, *_visitor_words(turn)
+    ):
         return _reject("unsupported_numeric", draft)
-    if not _regulated_literals_are_verbatim(factual_text, cited_text):
-        return _reject("unsupported_regulated", draft)
 
     safety = output_validator.evaluate(
         body,
@@ -411,24 +240,8 @@ def validate_draft(  # noqa: C901
         cited=[citation.chunk_id for citation in citations],
         citation_urls=[citation.source_url for citation in citations],
         live_urls={unit.source_url for unit in units if unit.source_url},
-        cited_answer_text=cited_text,
         off_brand_blocklist=list(turn.off_brand_blocklist),
-        max_chars=_MAX_CHARS,
-        curated_refusal=clarifying
-        or visitor_recap
-        or (
-            not citations
-            and (
-                bool(_LIMITATION_RE.search(body))
-                or (
-                    any(
-                        _UNPERFORMED_BOOKING_RE.fullmatch(s.group().strip())
-                        for s in sentence_spans(body)
-                    )
-                    and all(_is_keepable_gap(s.group()) for s in sentence_spans(body))
-                )
-            )
-        ),
+        max_chars=max_chars,
         public_contact_text=cited_text,
     )
     if not safety.accepted:

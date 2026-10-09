@@ -43,7 +43,7 @@ async def test_grounded_reply_stays_in_postgres_and_out_of_redis(migrated_db):
             page.url,
             chunk.answer_verbatim,
         )
-        from app.services.kb_embedder import FakeEmbedder
+        from tests.fakes import FakeEmbedder
 
         service = ConversationService(session, responder=responder, embedder=FakeEmbedder())
 

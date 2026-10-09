@@ -22,9 +22,14 @@ class TextChunk:
     review_note: str | None = None
 
 
-def pack_chunks(unit: EvidenceUnit, target: int = 900, overlap: int = 150) -> list[TextChunk]:
+MAX_CONTEXT_PART_CHARS = 200
+
+
+def pack_chunks(
+    unit: EvidenceUnit, target: int = 900, overlap: int = 150, *, page_title: str = ""
+) -> list[TextChunk]:
     answer = tidy_text(unit.answer_verbatim)
-    prefix = _embed_prefix(unit)
+    prefix = _embed_prefix(unit, page_title)
     source = tidy_text(unit.structured_text) if unit.structured_text is not None else answer
     room = max(32, target - len(prefix) - (1 if prefix else 0))
     pieces = _hard_split(source, room, overlap)
@@ -49,13 +54,20 @@ def pack_chunks(unit: EvidenceUnit, target: int = 900, overlap: int = 150) -> li
     return chunks
 
 
-def _embed_prefix(unit: EvidenceUnit) -> str:
-    parts = [unit.heading.strip()]
+def _embed_prefix(unit: EvidenceUnit, page_title: str = "") -> str:
+    """Page context that is embedded and indexed with a passage but never quoted.
+
+    A passage such as "Yes, within two days" only means something next to the page
+    it sits on and the section path above it; ``answer_verbatim`` stays untouched.
+    """
+    path = " > ".join(part.strip() for part in unit.heading_path if part.strip())
+    parts = [page_title.strip(), path or unit.heading.strip()]
     if unit.canonical_question:
         parts.append(unit.canonical_question.strip())
     if unit.aliases:
         parts.append(" | ".join(alias for alias in unit.aliases if alias))
-    return "\n".join(dict.fromkeys(part for part in parts if part))
+    clipped = (part[:MAX_CONTEXT_PART_CHARS] for part in parts if part)
+    return "\n".join(dict.fromkeys(clipped))
 
 
 def chunk_text(title: str, text: str) -> list[TextChunk]:

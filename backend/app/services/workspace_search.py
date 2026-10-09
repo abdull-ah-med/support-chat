@@ -3,6 +3,7 @@
 import unicodedata
 from typing import Literal
 from urllib.parse import urlencode
+from uuid import UUID
 
 from pydantic import BaseModel
 
@@ -97,7 +98,9 @@ class WorkspaceSearch:
     def __init__(self, session):
         self.repo = WorkspaceSearchRepository(session)
 
-    async def search(self, query: str, screen: Screen, admin: bool) -> SearchResults:
+    async def search(
+        self, query: str, screen: Screen, admin: bool, site_id: UUID | None = None
+    ) -> SearchResults:
         query = normalize(query).lstrip("#")
         terms = query.split()
         allowed = [d for d in DESTINATIONS if admin or d[0] != "logs"]
@@ -115,8 +118,8 @@ class WorkspaceSearch:
         ]
         if len(query) < 2:
             return SearchResults(current=[], navigation=navigation, other=[])
-        plain_sites = await self.repo.sites(terms)
-        navigation = await self.site_navigation(terms, allowed, plain_sites, navigation)
+        plain_sites = await self.repo.sites(terms, site_id)
+        navigation = await self.site_navigation(terms, allowed, plain_sites, navigation, site_id)
         items = []
         for row in plain_sites:
             items.append(
@@ -129,7 +132,7 @@ class WorkspaceSearch:
                     kind="site",
                 )
             )
-        for kind, target, row in await self.repo.records(terms, screen, admin):
+        for kind, target, row in await self.repo.records(terms, screen, admin, site_id):
             item_id = str(row["id"])
             params = record_params(kind, row)
             context = " · ".join(
@@ -163,7 +166,7 @@ class WorkspaceSearch:
             other=[i for i in items if i.screen != screen][:12],
         )
 
-    async def site_navigation(self, terms, allowed, plain_sites, navigation):
+    async def site_navigation(self, terms, allowed, plain_sites, navigation, site_id=None):
         # Recognize destination phrases separately from the entity name.
         intents = []
         for key, title, aliases in allowed:
@@ -181,7 +184,7 @@ class WorkspaceSearch:
             if remainder != terms and remainder:
                 intents.append((key, remainder))
         for key, remainder in intents:
-            for row in await self.repo.sites(remainder):
+            for row in await self.repo.sites(remainder, site_id):
                 label, param = SITE_DESTINATIONS[key]
                 navigation.append(
                     SearchItem(

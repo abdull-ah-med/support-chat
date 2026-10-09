@@ -109,8 +109,12 @@ class Settings(BaseSettings):
     rate_login_failure_window: int = 900
     anthropic_model: str = "claude-haiku-4-5-20251001"
     anthropic_api_key: str | None = None
-    anthropic_max_tokens: int = 500
-    anthropic_timeout: float = 30.0
+    anthropic_max_tokens: int = 1024
+    anthropic_structured_max_tokens: int = 1024
+    # Per attempt. With anthropic_max_retries the worst case for one call is
+    # (retries + 1) * timeout, which must fit inside the turn deadline.
+    anthropic_timeout: float = 20.0
+    anthropic_max_retries: int = 2
     haiku_model: str = "claude-haiku-4-5-20251001"
     haiku_max_tokens: int = 350
     haiku_timeout: float = 10.0
@@ -125,7 +129,9 @@ class Settings(BaseSettings):
     openai_embed_max_tokens: int = 8000
     max_answer_chars: int = 20000
     max_bot_answer_chars: int = 1500
-    anthropic_calls_per_minute: int = 6
+    # A turn makes 3-6 calls (resolve, draft, repairs, assess); 30 allows ~5 full turns
+    # a minute, above the 20/min visitor submit limit's useful rate but still a wallet cap.
+    anthropic_calls_per_minute: int = 30
     full_context_max_tokens: int = 50_000
     fast_path_min_score: float = 0.15
     fast_path_margin_ratio: float = 1.5
@@ -151,6 +157,47 @@ class Settings(BaseSettings):
     # FreeIPAPI public HTTPS endpoint; set to an empty string to disable IP lookups.
     ip_geolocation_provider_url: str | None = "https://free.freeipapi.com/api/v1/json"
     ip_geolocation_retry_hours: int = 24
+    # Identifies the knowledge crawler to the sites it reads. Product-level, not per site.
+    kb_crawler_user_agent: str = "SupportChatBot/1.0"
+    # Optional page describing the crawler; appended to the user agent as "(+url)".
+    kb_crawler_contact_url: str = ""
+    # Turn understanding (one structured call per visitor turn: language, intent, search query).
+    understanding_max_tokens: int = 900
+    unknown_reply_max_tokens: int = 300
+    # Page titles shown to the understanding call when a site has no assistant_scope, so the
+    # model can infer what the assistant covers from the knowledge itself.
+    understanding_topic_limit: int = 12
+    # Best dense similarity (0-1) at or above which retrieved passages count as relevant.
+    # Below it the drafting model is not called and the turn takes the "unknown" path.
+    # Hits with no similarity score (lexical-only) are not judged by this threshold.
+    evidence_min_cosine: float = 0.30
+    # "always" (default): the assessor reviews every answer, because overstatements (a changed
+    # number, a qualifier, a coverage claim) hide in fully cited, plain answers. "risk_based"
+    # skips it for plain, standalone, fully cited answers in the site's own language
+    # (see BotTurnService.assessment_required) to save about one model call per answer.
+    answer_assessor_mode: str = "always"
+
+    @field_validator("understanding_max_tokens", "understanding_topic_limit")
+    @classmethod
+    def understanding_positive_int(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("must be a positive integer")
+        return value
+
+    @field_validator("evidence_min_cosine")
+    @classmethod
+    def evidence_min_cosine_is_a_similarity(cls, value: float) -> float:
+        if not 0.0 <= value <= 1.0:
+            raise ValueError("EVIDENCE_MIN_COSINE must be between 0 and 1")
+        return value
+
+    @field_validator("answer_assessor_mode")
+    @classmethod
+    def assessor_mode_is_known(cls, value: str) -> str:
+        mode = value.strip().lower()
+        if mode not in {"risk_based", "always"}:
+            raise ValueError("ANSWER_ASSESSOR_MODE must be 'risk_based' or 'always'")
+        return mode
 
     def trusted_proxy_networks(self) -> list:
         networks = []
@@ -188,6 +235,14 @@ class Settings(BaseSettings):
         if value and len(value) < 64:
             raise ValueError("WIDGET_CSP_SERVICE_SECRET must be at least 64 characters")
         return value
+
+    @field_validator("kb_crawler_user_agent")
+    @classmethod
+    def kb_crawler_user_agent_nonempty(cls, value: str) -> str:
+        agent = value.strip()
+        if not agent:
+            raise ValueError("KB_CRAWLER_USER_AGENT must be non-empty")
+        return agent
 
     @field_validator("anthropic_model")
     @classmethod
@@ -230,6 +285,7 @@ class Settings(BaseSettings):
         "max_answer_chars",
         "max_bot_answer_chars",
         "anthropic_calls_per_minute",
+        "anthropic_structured_max_tokens",
         "full_context_max_tokens",
         "conversation_window_size",
         "message_replay_limit",
@@ -270,7 +326,7 @@ class Settings(BaseSettings):
             raise ValueError("must be zero or positive")
         return value
 
-    @field_validator("kb_ingest_host_delay_ms", "kb_ingest_retry_sleep")
+    @field_validator("kb_ingest_host_delay_ms", "kb_ingest_retry_sleep", "anthropic_max_retries")
     @classmethod
     def non_negative_int(cls, value: int) -> int:
         if value < 0:
@@ -340,6 +396,29 @@ class Settings(BaseSettings):
         if url.startswith("postgresql://"):
             return url.replace("postgresql://", "postgresql+psycopg://", 1)
         return url
+
+
+def require_provider_credentials(settings: Settings | None = None) -> None:
+    """Refuse to run an API or worker process that has no model providers.
+
+    Answers and search both depend on Anthropic and OpenAI; there is no degraded mode.
+    Only test runs (APP_ENV=test), which inject their own doubles, may start without keys.
+    """
+    active = settings if settings is not None else get_settings()
+    if active.app_env is AppEnvironment.TEST:
+        return
+    missing = [
+        name
+        for name, value in (
+            ("ANTHROPIC_API_KEY", active.anthropic_api_key),
+            ("OPENAI_API_KEY", active.openai_api_key),
+        )
+        if not (value or "").strip()
+    ]
+    if missing:
+        raise RuntimeError(
+            f"{' and '.join(missing)} must be set: the assistant has no fallback provider"
+        )
 
 
 @lru_cache

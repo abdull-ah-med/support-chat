@@ -16,6 +16,7 @@ from app.models.user import User
 from app.security.deps import get_current_admin
 from app.settings import reset_settings_cache
 from tests.bot_fixtures import insert_chunk, insert_site
+from tests.fake_anthropic import understanding
 
 SERVICE_FACT = (
     "247 SampleData gathers information from trusted sources and provides identity "
@@ -37,22 +38,30 @@ class _GroundedMessages:
         stage = kwargs.get("tool_choice", {}).get("name")
         if stage:
             payload = json.loads(kwargs["messages"][-1]["content"])
-            if stage == "resolve_request":
+            if stage == "understand_turn":
                 latest = payload["latest_message"]
-                value = {
-                    "query": latest,
-                    "relation": "continuation" if "simpl" in latest else "topic_change",
-                    "intent": "information",
-                    "ambiguity": "",
-                }
+                value = understanding(
+                    query=latest,
+                    relation="continuation" if "simpl" in latest else "topic_change",
+                )
             else:
                 value = {"status": "answered", "reason": "responsive"}
             return SimpleNamespace(
                 stop_reason="tool_use",
                 content=[SimpleNamespace(type="tool_use", name=stage, input=value)],
             )
-        latest = str(kwargs["messages"][-1]["content"])
-        documents = kwargs["messages"][0]["content"]
+        latest = " ".join(
+            block["text"]
+            for block in kwargs["messages"][-1]["content"]
+            if block.get("type") == "text"
+        )
+        documents = [
+            block
+            for message in kwargs["messages"]
+            if isinstance(message["content"], list)
+            for block in message["content"]
+            if block.get("type") == "document"
+        ]
         if "VBANK" in latest:
             needle, answer = VBANK_FACT, VBANK_REPLY
         elif "simpl" in latest.casefold():
@@ -124,7 +133,10 @@ async def _seed_workbench() -> tuple[UUID, UUID]:
 def workbench_client(migrated_db, monkeypatch):
     monkeypatch.setenv("APP_ENV", "local")
     monkeypatch.setenv("INTERNAL_EVAL_ENABLED", "true")
-    monkeypatch.setenv("OPENAI_API_KEY", "")
+    # APP_ENV=local is a real environment: the app refuses to start without provider keys.
+    # The embedder behind OPENAI_API_KEY is the test double installed by conftest.
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-key-for-fake-embedder")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-key-for-grounded-client")
     reset_settings_cache()
     monkeypatch.setattr("app.llm.bot_responder.AsyncAnthropic", _GroundedClient)
     BotResponder._shared_client = None

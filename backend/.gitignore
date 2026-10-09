@@ -12,3 +12,6 @@ htmlcov/
 !.env.example
 !.env.prod.example
 eval_artifacts/
+
+# TEMPORARY chatbot harness runtime logs
+.harness/

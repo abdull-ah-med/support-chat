@@ -15,6 +15,7 @@ from uuid import UUID
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.llm.understanding import KNOWLEDGE_INTENTS
 from app.models.conversation import Conversation
 from app.models.knowledge_gap import KnowledgeGap
 from app.models.message import Message
@@ -31,6 +32,8 @@ log = structlog.get_logger("knowledge_gap")
 # Decisions where the visitor's question had no verified answer on the site. A provider
 # outage (tech_fail) is not a content gap, and canned answers are answers.
 GAP_REASONS = frozenset({"no_evidence", "grounding_reject", "repeated_miss", "needs_confirmation"})
+# Intents that look something up in the site's knowledge (a contact route is looked up too).
+GAP_INTENTS = KNOWLEDGE_INTENTS | {"contact_request"}
 EXAMPLE_LIMIT = 3
 REPLY_LIMIT = 3
 
@@ -82,6 +85,10 @@ class KnowledgeGapService:
         names only the error class: SQL errors carry the question text as a parameter.
         """
         if decision.reason_code not in GAP_REASONS:
+            return
+        # Only a question the site's knowledge could answer is a content gap. Greetings, thanks,
+        # off-topic requests, abuse and instruction overrides are not.
+        if conversation.intent is not None and conversation.intent not in GAP_INTENTS:
             return
         try:
             async with self._session.begin_nested():

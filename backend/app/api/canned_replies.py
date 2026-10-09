@@ -82,8 +82,6 @@ class CannedImportRowOut(BaseModel):
     reason: str | None
     livechat_id: int | None
     group: int | None
-    group_name: str | None
-    livechat_website: str | None
     site_id: UUID | None
     shortcut: str
     aliases: list[str]
@@ -164,8 +162,6 @@ def _preview_row(row: ImportPlanRow) -> CannedImportRowOut:
         reason=row.reason,
         livechat_id=row.livechat_id,
         group=row.group,
-        group_name=row.group_name,
-        livechat_website=row.livechat_website,
         site_id=row.site_id,
         shortcut=row.shortcut,
         aliases=list(row.aliases),

@@ -6,11 +6,12 @@ from app.db import session_maker
 from app.models.kb_chunk import KbChunk
 from app.models.kb_snapshot import KbSnapshot
 from app.models.kb_source import KbSource
-from app.services.kb_embedder import FakeEmbedder, configured_embedder_id
+from app.services.kb_embedder import configured_embedder_id
 from app.services.kb_ingest import ingest_source
 from app.services.kb_snapshot import begin_snapshot, fail, promote, validate_snapshot
 from app.services.kb_validate import ValidationResult
 from tests.bot_fixtures import insert_site
+from tests.fakes import FakeEmbedder
 
 FAQ_URL = "https://sample-site.example.com/faq"
 TIMING_HTML = (

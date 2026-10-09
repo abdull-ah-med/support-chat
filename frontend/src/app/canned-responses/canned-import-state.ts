@@ -7,8 +7,6 @@ export type PreviewRow = {
   reason: string | null
   livechat_id: number | null
   group: number | null
-  group_name: string | null
-  livechat_website: string | null
   site_id: string | null
   shortcut: string
   excerpt: string
@@ -26,13 +24,6 @@ export type PreviewPayload = {
 export type SiteOption = { id: string; name: string }
 export type GroupTarget = string | "discard"
 
-const LIVECHAT_GROUPS: Record<number, { name: string; website: string | null }> = {
-  0: { name: "General", website: null },
-  4: { name: "Verification Checks", website: "sample-services.example.com" },
-  5: { name: "Instant Check", website: "sample-instant.example.com" },
-  6: { name: "SampleSite", website: "sample-site.example.com" },
-}
-
 const errorMessage = async (response: Response) => {
   try {
     const body = (await response.json()) as { detail?: string }
@@ -44,21 +35,12 @@ const errorMessage = async (response: Response) => {
 
 export const rowKey = (row: PreviewRow, index: number) => `${row.livechat_id ?? "row"}-${index}`
 
-const isUnmappedSiteSkip = (row: PreviewRow) =>
-  row.action === "skip" &&
-  row.group != null &&
-  /not a SupportChat (site|website)/i.test(row.reason || "")
+const isMappableRow = (row: PreviewRow) => row.group != null && row.action !== "skip"
 
-const isMappableRow = (row: PreviewRow) =>
-  row.group != null && (row.action !== "skip" || isUnmappedSiteSkip(row))
+export const isHardSkip = (row: PreviewRow) => row.action === "skip"
 
-export const isHardSkip = (row: PreviewRow) => row.action === "skip" && !isUnmappedSiteSkip(row)
-
-export const livechatGroupName = (group: number, rows: PreviewRow[]) =>
-  rows[0]?.group_name || LIVECHAT_GROUPS[group]?.name || `group ${group}`
-
-export const livechatGroupWebsite = (group: number, rows: PreviewRow[]) =>
-  rows[0]?.livechat_website || LIVECHAT_GROUPS[group]?.website || null
+// LiveChat only exports a group number, so that is the only name a group has here.
+export const livechatGroupName = (group: number) => `LiveChat group ${group}`
 
 export const groupedImportGroups = (rows: PreviewRow[]) => {
   const groups = new Map<number, PreviewRow[]>()
@@ -126,12 +108,8 @@ const buildDecisions = (
   remap_groups: remapGroupsFor(groupTargets),
 })
 
-export const unmappedGroupLabel = (group: number, rows: PreviewRow[]) => {
-  const name = rows[0]?.group_name
-  return name
-    ? `Choose a website for ${name}, or discard those responses.`
-    : `Choose a website for LiveChat group ${group}, or discard those responses.`
-}
+export const unmappedGroupLabel = (group: number) =>
+  `Choose a website for LiveChat group ${group}, or discard those responses.`
 
 const hasPendingUnmapped = (
   groups: [number, PreviewRow[]][],

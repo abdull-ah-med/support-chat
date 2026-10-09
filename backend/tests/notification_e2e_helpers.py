@@ -130,6 +130,98 @@ class GatewayHandler(BaseHTTPRequestHandler):
         pass
 
 
+class ModelHandler(BaseHTTPRequestHandler):
+    """Stand-in for the model providers: understands a request for a person, embeds on one axis."""
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if self.path.endswith("/embeddings"):
+            return self.embeddings(body)
+        tool = (body.get("tool_choice") or {}).get("name")
+        if tool != "understand_turn":
+            # No drafting or assessment is scripted: the bot answers with its technical-failure copy.
+            self.send_response(500)
+            self.end_headers()
+            return
+        message = json.loads(body["messages"][0]["content"])["latest_message"]
+        wants_person = "person" in message
+        understanding = {
+            "language": "en",
+            "intent": "handoff_request" if wants_person else "question",
+            "relation": "standalone",
+            "query": message,
+            "ambiguity": "",
+            "matches_handoff_topic": False,
+            "reply": "",
+        }
+        payload = json.dumps(
+            {
+                "id": "msg_e2e",
+                "type": "message",
+                "role": "assistant",
+                "model": body["model"],
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_e2e",
+                        "name": "understand_turn",
+                        "input": understanding,
+                    }
+                ],
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 10, "output_tokens": 10},
+            }
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def embeddings(self, body):
+        texts = body["input"] if isinstance(body["input"], list) else [body["input"]]
+        vector = [1.0] + [0.0] * ((body.get("dimensions") or 1536) - 1)
+        if body.get("encoding_format") == "base64":
+            import struct
+
+            vector = base64.b64encode(struct.pack(f"{len(vector)}f", *vector)).decode()
+        payload = json.dumps(
+            {
+                "object": "list",
+                "model": body["model"],
+                "data": [
+                    {"object": "embedding", "index": index, "embedding": vector}
+                    for index, _ in enumerate(texts)
+                ],
+                "usage": {"prompt_tokens": 1, "total_tokens": 1},
+            }
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, *_args):
+        pass
+
+
+class ModelGateway:
+    def __init__(self):
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), ModelHandler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    @property
+    def url(self):
+        return f"http://127.0.0.1:{self.server.server_port}"
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+
+
 class PushGateway:
     def __init__(self, directory):
         self.cert, key = make_certificate(directory)
@@ -193,6 +285,7 @@ uvicorn.Server(uvicorn.Config("app.main:app", access_log=False)).run(sockets=[li
 class NotificationStack:
     def __init__(self, directory):
         self.gateway = PushGateway(directory)
+        self.model = ModelGateway()
         self.workers, self.logs = [], []
         self.environment = os.environ | {
             "ENABLE_BACKGROUND_WORKERS": "false",
@@ -207,8 +300,11 @@ class NotificationStack:
             "RATE_VISITOR_SUBMIT": "200",
             "RATE_VISITOR_SUBMIT_IP": "500",
             "E2E_IDLE_TICK_SECONDS": "1",
-            "ANTHROPIC_API_KEY": "",
-            "OPENAI_API_KEY": "",
+            "ANTHROPIC_API_KEY": "sk-ant-e2e-test-key-not-real",
+            "ANTHROPIC_BASE_URL": self.model.url,
+            "ANTHROPIC_MAX_RETRIES": "0",
+            "OPENAI_API_KEY": "sk-e2e-test-key-not-real",
+            "OPENAI_BASE_URL": self.model.url + "/v1",
         }
         # Bind port 0 here and hand the open socket to the API: no free-port race.
         listener = socket.socket()
@@ -348,6 +444,7 @@ class NotificationStack:
         self.stop_process(self.api)
         self.http.close()
         self.gateway.close()
+        self.model.close()
         for output in self.logs:
             output.close()
 

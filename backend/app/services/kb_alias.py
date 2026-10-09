@@ -24,7 +24,7 @@ async def generate_aliases(unit: EvidenceUnit) -> tuple[str, ...]:
         return unit.aliases
     settings = get_settings()
     if not settings.anthropic_api_key:
-        return unit.aliases
+        raise RuntimeError("ANTHROPIC_API_KEY is required to generate aliases")
     from anthropic import AsyncAnthropic
 
     client = AsyncAnthropic(api_key=settings.anthropic_api_key, timeout=10)

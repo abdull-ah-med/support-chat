@@ -22,7 +22,7 @@ from app.services.kb_backoff import classify_error, next_run_at, should_dead_let
 from app.services.kb_crawl import (
     FetchError,
 )
-from app.services.kb_embedder import Embedder, FakeEmbedder, OversizeChunkError
+from app.services.kb_embedder import Embedder, OversizeChunkError, default_embedder
 from app.services.kb_extract import extract_html
 from app.services.kb_extract.text import visible_copy
 from app.services.kb_extract.types import EvidenceUnit
@@ -87,7 +87,7 @@ async def run_ingest(
     source.pages_skipped_unchanged = 0
     await session.commit()
     snapshot_id = await begin_snapshot(session, source.id)
-    worker = embedder or FakeEmbedder()
+    worker = embedder if embedder is not None else default_embedder()
     if source.source_kind == "text":
         await _run_text_ingest(session, source, snapshot_id, worker, llm_client)
         return
@@ -622,7 +622,9 @@ async def _persist_extracted(
         _record_job_event(job, "embed", "running", renderer=result.renderer)
         await session.commit()
     try:
-        pieces, vectors, token_estimate = await _prepare_chunks(units, worker)
+        pieces, vectors, token_estimate = await _prepare_chunks(
+            units, worker, page_title=result.title or ""
+        )
     except OversizeChunkError:
         async with lock:
             await _fail_page(session, source, page, job, "oversize")

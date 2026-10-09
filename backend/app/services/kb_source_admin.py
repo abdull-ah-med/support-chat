@@ -14,13 +14,11 @@ from app.models.site import Site
 from app.models.user import User
 from app.repositories.kb_snapshot_repo import KbSnapshotRepository
 from app.repositories.kb_source_repo import KbSourceRepository
-from app.services.kb_embedder import configured_embedder_id, default_embedder
+from app.services.kb_embedder import Embedder, configured_embedder_id, default_embedder
 from app.services.kb_ingest import CanonicalError, canonical_fetch_url, enqueue_wakeup, host_allowed
 from app.services.kb_ingest_chunks import _chunk_content_hash
 from app.services.kb_ingest_state import _pg_safe
 from app.services.site_admin import AdminError
-
-SAMPLESITE_SMOKE = ["24-48", "MRO", "rapid"]
 
 
 def general_tab_id(source_id: UUID) -> UUID:
@@ -32,8 +30,9 @@ def _origin_count():
 
 
 class KbSourceService:
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, embedder: Embedder | None = None) -> None:
         self._session = session
+        self._embedder = embedder
 
     async def list_sources(self, site_id: UUID) -> list[KbSource]:
         site = await self._session.get(Site, site_id)
@@ -78,7 +77,6 @@ class KbSourceService:
             existing.stage = "idle"
             existing.error_code = None
             existing.enabled = True
-            await self._ensure_samplesite_smoke(existing)
             await self._session.commit()
             if not already_queued:
                 await enqueue_wakeup(existing.id)
@@ -100,7 +98,6 @@ class KbSourceService:
         )
         self._session.add(source)
         await self._session.flush()
-        await self._ensure_samplesite_smoke(source)
         await self._session.commit()
         await enqueue_wakeup(source.id)
         return source
@@ -177,22 +174,6 @@ class KbSourceService:
             fetch_url = canonical_fetch_url(raw)
             if not host_allowed(fetch_url, site, start_url):
                 raise AdminError("invalid_origin")
-
-    async def _ensure_samplesite_smoke(self, source: KbSource) -> None:
-        if "sample-site.example.com" not in source.start_url.casefold():
-            return
-        existing = await self._session.scalar(
-            select(KbSmokeAssertion.id).where(KbSmokeAssertion.source_id == source.id)
-        )
-        if existing is not None:
-            return
-        self._session.add(
-            KbSmokeAssertion(
-                source_id=source.id,
-                must_include=list(SAMPLESITE_SMOKE),
-                must_exclude=[],
-            )
-        )
 
     async def patch_source(
         self,
@@ -372,7 +353,8 @@ class KbSourceService:
             if chunk.body != clean:
                 raise AdminError("conflict")
             return
-        vectors = await default_embedder().embed_documents([clean])
+        embedder = self._embedder if self._embedder is not None else default_embedder()
+        vectors = await embedder.embed_documents([clean])
         chunk.body = clean
         chunk.answer_verbatim = clean
         chunk.last_body_edit_id = edit_id
@@ -404,6 +386,12 @@ class KbSourceService:
         source = await self._session.get(KbSource, source_id)
         if source is None:
             raise AdminError("not_found")
+        for snapshot_id in (from_id, to_id):
+            if snapshot_id is None:
+                continue
+            snapshot = await self._session.get(KbSnapshot, snapshot_id)
+            if snapshot is None or snapshot.source_id != source_id:
+                raise AdminError("not_found")
         repo = KbSnapshotRepository(self._session)
         live = await repo.get_live(source_id)
         previous = await repo.previous_superseded(source_id)

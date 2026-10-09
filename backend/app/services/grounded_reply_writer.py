@@ -25,6 +25,9 @@ from app.services.grounded_response_types import (
 )
 from app.services.knowledge_gap_service import KnowledgeGapService
 
+# Replies that end a run of misses: the visitor was understood and served, or declined a person.
+_RESETS_MISSES = frozenset({"supported_next_step", "off_topic", "handoff_declined"})
+
 
 class GroundedReplyWriter:
     def __init__(self, session: AsyncSession) -> None:
@@ -77,7 +80,7 @@ class GroundedReplyWriter:
             )
         if (
             decision.outcome is ResponseOutcome.SYNTHESIZED_ANSWER
-            or decision.reason_code == "supported_next_step"
+            or decision.reason_code in _RESETS_MISSES
         ):
             conversation.fallback_count = 0
         elif (
@@ -85,8 +88,6 @@ class GroundedReplyWriter:
             or decision.outcome is ResponseOutcome.CLARIFICATION
         ):
             conversation.fallback_count += 1
-        elif decision.reason_code == "off_topic":
-            conversation.fallback_count = 0
         if decision.offer_handoff and decision.outcome in {
             ResponseOutcome.KNOWLEDGE_GAP,
             ResponseOutcome.PARTIAL_ANSWER,
@@ -99,26 +100,32 @@ class GroundedReplyWriter:
         return inserted
 
     @staticmethod
-    def _system_reason_for(decision: ResponseDecision) -> str:
-        if decision.reason_code == "canned_reply":
+    def _system_reason_for(decision: ResponseDecision) -> str:  # noqa: C901
+        """The stored reason for a bot row (the messages table limits bot rows without sources)."""
+        reason = decision.reason_code
+        if reason == "canned_reply":
             return "canned"
         if decision.outcome is ResponseOutcome.CLARIFICATION:
             return "clarify"
-        if decision.reason_code == "source_followup":
+        if reason == "source_followup":
             return "answer"
-        if decision.reason_code == "tech_fail" or (
-            decision.provider_status is ProviderStatus.TECH_FAIL
-        ):
+        if reason == "tech_fail" or decision.provider_status is ProviderStatus.TECH_FAIL:
             return "tech_fail"
-        if (
-            decision.reason_code == "grounding_reject"
-            or decision.outcome is ResponseOutcome.PARTIAL_ANSWER
+        if reason == "identifiers_shared":
+            return "sensitive"
+        if reason in {"off_topic", "abuse", "prompt_injection"}:
+            return "off_topic"
+        if reason in {"grounding_reject", "no_evidence", "repeated_miss"} or (
+            decision.outcome is ResponseOutcome.PARTIAL_ANSWER
         ):
             return "insufficient"
         if decision.citations:
             return "answer"
         if decision.outcome is ResponseOutcome.BOUNDARY:
             return "policy_boundary"
+        if decision.outcome is ResponseOutcome.SYNTHESIZED_ANSWER:
+            # Conversational text with no company facts (greeting, contact route, recap).
+            return "uncited_advisory"
         return "insufficient"
 
     async def citations_live(self, site_id: UUID, citations: list[Citation]) -> bool:

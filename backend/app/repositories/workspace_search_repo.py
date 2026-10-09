@@ -45,19 +45,22 @@ class WorkspaceSearchRepository:
     def __init__(self, session: AsyncSession):
         self.session = session
 
-    async def sites(self, terms):
+    async def sites(self, terms, site_id=None):
         haystack = search_text(Site.name, Site.key, Site.website_url)
+        statement = select(Site.id, Site.name, Site.key, Site.website_url).where(
+            matches(haystack, terms)
+        )
+        if site_id is not None:
+            statement = statement.where(Site.id == site_id)
         rows = await self.session.execute(
-            select(Site.id, Site.name, Site.key, Site.website_url)
-            .where(matches(haystack, terms))
-            .order_by(
+            statement.order_by(
                 case((normalized(Site.name) == " ".join(terms), 0), else_=1), Site.name, Site.id
-            )
-            .limit(12)
+            ).limit(12)
         )
         return rows.mappings().all()
 
-    async def records(self, terms, screen, admin):
+    async def records(self, terms, screen, admin, site_id=None):
+        """Ranked records. With site_id, only that site's records (plus General canned replies)."""
         query = " ".join(terms)
         result = []
         # Match all terms across contact details, site, classification, and transcript.
@@ -113,6 +116,8 @@ class WorkspaceSearchRepository:
             conversations = conversations.where(Conversation.prechat_submission_id.is_not(None))
         else:
             conversations = conversations.where(Conversation.state != "prechat")
+        if site_id is not None:
+            conversations = conversations.where(Conversation.site_id == site_id)
         rows = (
             (
                 await self.session.execute(
@@ -195,18 +200,23 @@ class WorkspaceSearchRepository:
                 None,
             ),
         ]
-        for kind, target, model, title, body, text, site_id, date, extra in specs:
+        for kind, target, model, title, body, text, site_column, date, extra in specs:
             stmt = select(
                 model.id,
                 func.left(title, 180).label("title"),
                 excerpt(body, terms).label("excerpt"),
-                site_id.label("site_id"),
+                site_column.label("site_id"),
                 Site.name.label("site_name"),
                 (extra if extra is not None else literal(None)).label("extra"),
             )
-            stmt = stmt.outerjoin(Site, Site.id == site_id).where(
+            stmt = stmt.outerjoin(Site, Site.id == site_column).where(
                 and_(*(or_(matches(text, [term]), matches(Site.name, [term])) for term in terms))
             )
+            if site_id is not None:
+                in_scope = site_column == site_id
+                if kind == "response":
+                    in_scope = or_(in_scope, site_column.is_(None))
+                stmt = stmt.where(in_scope)
             if kind == "gap":
                 settings = get_settings()
                 recent = (
@@ -271,6 +281,8 @@ class WorkspaceSearchRepository:
             .join(Site, Site.id == KbChunk.site_id)
             .join(KbSnapshot, KbSnapshot.id == KbChunk.snapshot_id)
         )
+        if site_id is not None:
+            chunks = chunks.where(KbChunk.site_id == site_id)
         chunks = chunks.where(
             KbSnapshot.state == "live",
             and_(*(or_(matches(chunk_text, [term]), matches(Site.name, [term])) for term in terms)),
@@ -289,7 +301,8 @@ class WorkspaceSearchRepository:
             .all()
         )
         result.extend(("answer", "knowledge", row) for row in rows)
-        if admin:
+        # Logs are not tied to a site, so a site-scoped search never returns them.
+        if admin and site_id is None:
             rows = (
                 (
                     await self.session.execute(

@@ -21,7 +21,6 @@ from app.models.visitor import Visitor
 from app.repositories.knowledge_gap_repo import KnowledgeGapRepository
 from app.services.conversation_service import ConversationService
 from app.services.grounded_response import ModelDraft
-from app.services.kb_embedder import FakeEmbedder
 from app.services.knowledge_gap_service import KnowledgeGapService
 from app.workers import durable_work
 from tests.bot_fixtures import (
@@ -30,6 +29,8 @@ from tests.bot_fixtures import (
     insert_chunk,
     insert_site,
 )
+from tests.fake_anthropic import ScriptedResponder
+from tests.fakes import FakeEmbedder, MappedEmbedder
 from tests.ws_helpers import HOST_ORIGIN
 
 ENROLL = "How do I enroll a driver?"
@@ -41,6 +42,10 @@ ANSWER_VERBATIM = (
     "We support DOT drug and alcohol testing, random pool management, and DOT physicals."
 )
 CANNED_BODY = "Most negative results are reported within 24-48 hours."
+
+
+# "drug" questions sit on the passage's axis; "how long" on the turnaround axis.
+ASK_EMBEDDER = MappedEmbedder({"drug": 3, "how long": 0})
 
 
 def _vector(x: float, y: float) -> list[float]:
@@ -86,7 +91,7 @@ async def _ask(session, site, text: str, responder=None) -> tuple[Conversation, 
     visitor, conversation = await insert_bot_conversation(session, site)
     await session.commit()
     service = ConversationService(
-        session, responder=responder or _unused_responder(), embedder=FakeEmbedder()
+        session, responder=responder or _unused_responder(), embedder=ASK_EMBEDDER
     )
     result = await service.visitor_message(
         conversation.id, visitor.id, HOST_ORIGIN, uuid.uuid4(), text
@@ -167,7 +172,7 @@ async def test_rejected_model_answer_counts_as_a_miss(migrated_db) -> None:
         "A specialist can confirm details for your specific case."
     )
 
-    class UncitedDraft:
+    class UncitedDraft(ScriptedResponder):
         async def generate_grounded_draft(self, turn, documents, **_kwargs):
             del turn, documents
             return ModelDraft(body=uncited_body, citations=[], request_id="req_no_cite")
@@ -214,7 +219,7 @@ async def test_a_database_error_while_recording_never_loses_the_reply(
         hits = await _hits(session)
 
     assert [(row.system_reason, row.response_reason_code) for row in stored] == [
-        ("clarify", "no_evidence")
+        ("insufficient", "no_evidence")
     ]
     assert hits == []
 
@@ -222,7 +227,7 @@ async def test_a_database_error_while_recording_never_loses_the_reply(
 async def test_a_provider_outage_is_not_a_knowledge_gap(migrated_db) -> None:
     """Catches an Anthropic outage filling the queue with questions the site already answers."""
 
-    class DownProvider:
+    class DownProvider(ScriptedResponder):
         async def generate_grounded_draft(self, turn, documents, **_kwargs):
             del turn, documents
             raise TimeoutError
@@ -267,7 +272,16 @@ async def test_a_canned_answer_leaves_no_hit(migrated_db) -> None:
     """Catches a verbatim canned answer being counted as a knowledge gap."""
     async with session_maker()() as session:
         site = await insert_site(session, "samplesite", "SampleSite")
-        session.add(CannedReply(site_id=site.id, shortcut="turnaround_results", body=CANNED_BODY))
+        from app.services.canned_bot import refresh_canned_embedding
+
+        canned = CannedReply(
+            site_id=site.id,
+            shortcut="turnaround_results",
+            body=CANNED_BODY,
+            aliases=["how long until results"],
+        )
+        await refresh_canned_embedding(canned, FakeEmbedder())
+        session.add(canned)
         _, reply = await _ask(session, site, "How long until results come back?")
         hits = await _hits(session)
 

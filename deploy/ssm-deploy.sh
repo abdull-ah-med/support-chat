@@ -51,4 +51,9 @@ fi
 
 read -r -a APP_SERVICES <<< "$COMPOSE_APP_SERVICES"
 "${COMPOSE[@]}" up --build -d --wait --wait-timeout 180 "${APP_SERVICES[@]}"
-docker image prune -f
+
+# Reclaim disk: the BuildKit cache and superseded images grow by several GB per deploy.
+# Keep recent layers so the next build stays fast; running containers' images are never removed.
+# Best-effort: the deploy already succeeded, so a failed prune must not fail it.
+docker image prune -af --filter "until=72h" || true
+docker builder prune -af --filter "until=48h" || true

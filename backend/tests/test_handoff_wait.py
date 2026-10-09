@@ -11,20 +11,26 @@ from app.models.conversation import Conversation
 from app.models.message import Message
 from app.models.user import User
 from app.services.conversation_service import CommandError, ConversationService
-from tests.bot_fixtures import insert_bot_conversation, insert_site
+from tests.bot_fixtures import RecordingResponder, insert_bot_conversation, insert_site
 from tests.ws_helpers import HOST_ORIGIN, insert_staff, message_count
 
 START = datetime(2026, 10, 7, 16, tzinfo=UTC)
 PROMPT = "Our agents are all currently busy right now. Would you like to wait?"
 
 
+async def request_person(session, chat, visitor, text="I need to talk to a person"):
+    service = ConversationService(
+        session, responder=RecordingResponder(understand={"intent": "handoff_request"})
+    )
+    result = await service.visitor_message(chat.id, visitor.id, HOST_ORIGIN, uuid4(), text)
+    await service.run_bot_turn(chat.id, result.generation_id)
+
+
 async def waiting_chat(session):
     site = await insert_site(session, "waiting", "Waiting")
     visitor, chat = await insert_bot_conversation(session, site)
     await session.commit()
-    await ConversationService(session).visitor_message(
-        chat.id, visitor.id, HOST_ORIGIN, uuid4(), "I need to talk to a person"
-    )
+    await request_person(session, chat, visitor)
     chat.handoff_wait_started_at = START
     chat.last_message_at = START
     await session.commit()
@@ -169,9 +175,7 @@ async def test_callback_handoff_stays_in_attention_queue_without_live_wait_promp
         visitor, chat = await insert_bot_conversation(session, site)
         await session.commit()
         service = ConversationService(session)
-        await service.visitor_message(
-            chat.id, visitor.id, HOST_ORIGIN, uuid4(), "I need to talk to a person"
-        )
+        await request_person(session, chat, visitor)
         chat.last_message_at = START
         await session.commit()
         results = await service.close_expired(now=START + timedelta(hours=1))
@@ -187,9 +191,7 @@ async def test_callback_backlog_does_not_block_due_live_wait_prompts_in_bounded_
         site.human_enabled = False
         visitor, callback = await insert_bot_conversation(session, site)
         await session.commit()
-        await ConversationService(session).visitor_message(
-            callback.id, visitor.id, HOST_ORIGIN, uuid4(), "I need a person"
-        )
+        await request_person(session, callback, visitor, "I need a person")
         callback.last_message_at = START - timedelta(days=1)
         await session.commit()
         _, live = await waiting_chat(session)

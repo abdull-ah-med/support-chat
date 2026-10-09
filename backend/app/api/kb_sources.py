@@ -368,6 +368,15 @@ async def snapshot_diff(
     from_id: Annotated[UUID | None, Query(alias="from")] = None,
     to_id: Annotated[UUID | None, Query(alias="to")] = None,
 ) -> DiffOut:
+    snapshots = KbSnapshotRepository(session)
+    for snapshot_id in (from_id, to_id):
+        # A diff compares versions of one source; a snapshot of another source (or site) is
+        # not addressable through this one.
+        if snapshot_id is None:
+            continue
+        snapshot = await snapshots.get_by_id(snapshot_id)
+        if snapshot is None or snapshot.source_id != source_id:
+            raise _http_error(AdminError("not_found"))
     try:
         payload = await KbSourceService(session).diff_snapshots(source_id, from_id, to_id)
     except AdminError as exc:

@@ -1,4 +1,5 @@
 import asyncio
+import threading
 import time
 import uuid
 from concurrent.futures import CancelledError, ThreadPoolExecutor
@@ -6,7 +7,7 @@ from concurrent.futures import CancelledError, ThreadPoolExecutor
 import pytest
 from fastapi.testclient import TestClient
 
-from app.chat.outcome_copy import keep_helping_line
+from app.chat.outcome_copy import KEEP_HELPING_LINE
 from app.models.conversation import Conversation
 from app.models.message import Message
 from app.models.visitor import Visitor
@@ -14,7 +15,6 @@ from tests.ws_helpers import (
     AGENT_HELP,
     AGENT_MESSAGE_ID,
     ALEX_NAME,
-    DEMO_NAME,
     DEMO_PUBLIC_KEY,
     DEMO_SITE_KEY,
     DOT_QUESTION,
@@ -418,7 +418,7 @@ def test_visitor_escalate_frame_stays_with_the_bot(
     client: TestClient,
 ) -> None:
     ctx = _boot(client)
-    keep_helping = keep_helping_line(DEMO_NAME)
+    keep_helping = KEEP_HELPING_LINE
     offered: list[dict] = []
 
     # Starlette's TestClient portal can CancelledError on close after fanout;
@@ -850,13 +850,19 @@ def test_visitor_socket_stays_open_during_long_bot_turn(
     import app.chat.ws_visitor as ws_visitor
     from app.services.conversation_service import ConversationService
 
-    monkeypatch.setattr(ws_visitor, "IDLE_CHECK_SECONDS", 0.15)
-    monkeypatch.setattr(ws_visitor, "IDLE_PING_AFTER_SECONDS", 0.2)
-    monkeypatch.setattr(ws_visitor, "IDLE_CLOSE_SECONDS", 0.6)
+    monkeypatch.setattr(ws_visitor, "IDLE_CHECK_SECONDS", 0.05)
+    monkeypatch.setattr(ws_visitor, "IDLE_PING_AFTER_SECONDS", 0.1)
+    # Generous close threshold: the bot turn is held open by a signal, not a sleep,
+    # so only a ping answered promptly (not a tight wall-clock window) is required.
+    monkeypatch.setattr(ws_visitor, "IDLE_CLOSE_SECONDS", 5.0)
     original = ConversationService.run_bot_turn
+    release_bot = threading.Event()
 
     async def slow(self, conversation_id, generation_id, **kwargs):
-        await asyncio.sleep(1.1)
+        # Stay in flight until the test has seen an idle ping, however slow the machine.
+        deadline = asyncio.get_running_loop().time() + 20.0
+        while not release_bot.is_set() and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.01)
         return await original(self, conversation_id, generation_id, **kwargs)
 
     monkeypatch.setattr(ConversationService, "run_bot_turn", slow)
@@ -896,6 +902,7 @@ def test_visitor_socket_stays_open_during_long_bot_turn(
             frames.append(frame)
             if frame.get("type") == "ping":
                 visitor.send_json({"v": 1, "type": "pong"})
+                release_bot.set()
             if frame.get("type") == "typing" and frame.get("active") is False:
                 break
         else:

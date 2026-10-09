@@ -14,6 +14,15 @@ ENV UV_COMPILE_BYTECODE=1 \
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
+# Browsers depend only on the locked dependencies, so install them before the app source:
+# an app code change must not re-download Chromium and rebuild this multi-GB layer.
+RUN groupadd --system app \
+    && useradd --system --gid app --create-home --home-dir /home/app app \
+    && playwright install-deps chromium \
+    && playwright install chromium \
+    && crawl4ai-setup \
+    && chown -R app:app /home/app /ms-playwright
+
 COPY alembic.ini ./
 COPY alembic ./alembic
 COPY app ./app
@@ -23,12 +32,7 @@ COPY docker/migrate.sh ./docker/migrate.sh
 
 RUN chmod +x /entrypoint.sh /app/docker/migrate.sh \
     && uv sync --frozen --no-dev \
-    && uv run playwright install-deps chromium \
-    && uv run playwright install chromium \
-    && uv run crawl4ai-setup \
-    && groupadd --system app \
-    && useradd --system --gid app --create-home --home-dir /home/app app \
-    && chown -R app:app /app /home/app /ms-playwright
+    && chown -R app:app /app
 
 USER app
 

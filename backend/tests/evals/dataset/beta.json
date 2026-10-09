@@ -1,0 +1,41 @@
+{
+  "site_key": "beta",
+  "cases": [
+    {
+      "id": "grounded.shared_faq",
+      "family": "grounded.shared",
+      "turns": [
+        "How do I reset my account password?"
+      ],
+      "expected_state": "bot",
+      "expect_citations": true,
+      "must_contain": [
+        "Reset password"
+      ]
+    },
+    {
+      "id": "grounded.own_private_faq",
+      "family": "grounded.private",
+      "turns": [
+        "Does Beta offer on-site installation?"
+      ],
+      "expected_state": "bot",
+      "expect_citations": true,
+      "must_contain": [
+        "Beta"
+      ]
+    },
+    {
+      "id": "unknown.other_sites_private_faq",
+      "family": "abstain.other_site",
+      "turns": [
+        "Which payment methods does Alpha accept?"
+      ],
+      "expected_state": "bot",
+      "expected_unknown": true,
+      "must_not_contain": [
+        "Alpha accepts cards and bank transfer."
+      ]
+    }
+  ]
+}

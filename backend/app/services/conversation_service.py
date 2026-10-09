@@ -8,25 +8,10 @@ import structlog
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.chat.outcome_copy import (
-    chitchat_reply,
-    contact_line,
-    is_transfer_offer_body,
-    keep_helping_line,
-    transfer_offer_line,
-)
+from app.chat.outcome_copy import KEEP_HELPING_LINE, TECH_FAIL_HUMAN, TECH_FAIL_SOLO
 from app.chat.state_machine import IllegalTransition, apply_event
-from app.llm.intent import (
-    classify_intent,
-    classify_sensitive,
-    is_chitchat,
-    is_contact_request,
-    is_escalate_request,
-    is_transfer_consent,
-    is_transfer_decline,
-)
-from app.llm.safety_markers import SensitiveCategory
-from app.models.conversation import Conversation
+from app.llm.safety_markers import mask_identifiers
+from app.models.conversation import INTENT_MAX_LENGTH, Conversation
 from app.models.message import Message
 from app.models.site import Site
 from app.models.user import User
@@ -66,15 +51,12 @@ from app.services.conversation_types import (
 from app.services.conversation_types import ReturningIdentity, VisitorConversationSummary
 from app.services.grounded_reply_writer import GroundedReplyWriter
 from app.services.grounded_response import (
-    EvidenceUnit,
+    OFFERED_PERSON_REASONS,
     ResponseDecision,
-    ResponseOutcome,
     _safe_technical_failure,
 )
 from app.services.handoff_service import EscalationReason, HandoffService, HandoffTrigger
-from app.services.pii_redactor import redact_for_log
 from app.services.rate_limit import RateLimiter, RateLimitExceeded, RateLimitUnavailable
-from app.services.refusal_library import fallback_refusal_body, lookup_refusal
 from app.settings import get_settings
 
 log = structlog.get_logger("chat")
@@ -89,7 +71,8 @@ HANDOFF_WAIT_LINE = "Our agents are all currently busy right now. Would you like
 IDLE_TTL = timedelta(minutes=5)
 IDLE_WARN = IDLE_TTL - timedelta(minutes=1)
 OPEN_IDLE_STATES = frozenset({"prechat", "bot", "human"})
-SENSITIVE_LINE = "Please do not share Social Security numbers or other personal identifiers."
+# The assistant answers in these states; in "human" a person owns the chat and it stays silent.
+BOT_ANSWERING_STATES = frozenset({"bot", "queued"})
 RESUMED_LINE = "This chat has been resumed."
 RESET_LINE = "This chat was reset by the visitor."
 VISITOR_HISTORY_LIMIT = 25
@@ -117,9 +100,7 @@ class ConversationService:
         self._notifications = NotificationRepository(session)
         self._users = UserRepository(session)
         self._blocks = VisitorBlockRepository(session)
-        self._bot_turn = BotTurnService(
-            session, responder, embedder, evidence_loader=self._retrieve_evidence
-        )
+        self._bot_turn = BotTurnService(session, responder, embedder)
         self._reply_writer = GroundedReplyWriter(session)
         self._pending_handoff_summary = None
         self._bootstrap_wakeups: list[Conversation] = []
@@ -484,6 +465,7 @@ class ConversationService:
         pending_hello: tuple[str, str | None, str | None] | None = None,
     ) -> CommandResult:
         clean = normalize_prechat(name, email, phone, inquiry_type, message)
+        clean["message"] = mask_identifiers(clean["message"])
         conversation, site_key = await self._lock_or_open_visitor_conversation(
             conversation_id, visitor_id, parent_origin, pending_hello
         )
@@ -572,7 +554,8 @@ class ConversationService:
         body: str,
         client_ip: str | None = None,
     ) -> CommandResult:
-        text = require_message_body(body)
+        # Identifier-shaped values never reach the stored conversation.
+        text = mask_identifiers(require_message_body(body))
         conversation, site_key = await self._lock_visitor_conversation(
             conversation_id, visitor_id, parent_origin
         )
@@ -588,7 +571,10 @@ class ConversationService:
                 client_message_id=str(client_message_id),
                 duplicate=True,
             )
-        if conversation.state == "bot" and conversation.active_generation_id is not None:
+        if (
+            conversation.state in BOT_ANSWERING_STATES
+            and conversation.active_generation_id is not None
+        ):
             raise CommandError("assistant_busy")
         await self._rate_limit_submit(conversation.site_id, visitor_id, client_ip)
         conversation.state = _transition(conversation.state, "visitor_message")
@@ -631,9 +617,9 @@ class ConversationService:
         site = await self._sites.get_by_id(conversation.site_id)
         if site is None:
             raise CommandError("invalid")
-        conversation.intent = "escalate"
+        conversation.intent = "handoff_request"
         inserted = None
-        if await self._awaiting_transfer_consent(conversation.id):
+        if site.human_enabled and await self._awaiting_transfer_consent(conversation.id):
             question = await self._latest_offered_question(conversation.id)
             await self._open_handoff(
                 conversation,
@@ -642,9 +628,7 @@ class ConversationService:
             )
         else:
             conversation.active_generation_id = None
-            inserted = await self._insert_message(
-                conversation, "system", keep_helping_line(site.name)
-            )
+            inserted = await self._insert_message(conversation, "system", KEEP_HELPING_LINE)
         await self._commit_and_schedule()
         log.info(
             "escalate",
@@ -1074,56 +1058,35 @@ class ConversationService:
         self._pending_handoff_summary = row
         return row
 
+    async def _cancel_pending_handoff(self, conversation: Conversation) -> None:
+        """The visitor withdrew the request for a person before anyone joined: stand it down."""
+        if conversation.state != "queued" or conversation.assigned_agent_id is not None:
+            return
+        row = await HandoffService(self._session).withdraw(conversation.id)
+        if row is None:
+            return
+        conversation.state = _transition(conversation.state, "cancel_handoff")
+        conversation.attention_needed = False
+        conversation.escalation_reason = None
+        conversation.handoff_wait_started_at = None
+        conversation.handoff_wait_prompt_id = None
+        await self._notifications.retire_conversation(conversation.id)
+
     def _schedule_handoff_summary(self, row) -> None:
         HandoffService(self._session).trace_summary_queued(row)
 
     async def _arm_bot_turn(self, conversation: Conversation, site: Site, text: str) -> UUID | None:
+        """Hand the turn to the generation worker.
+
+        Nothing is decided here: what the visitor meant (a question, a request for a person, a
+        greeting, ...) is understood by the model inside the generation, in their language.
+        """
+        del text
         if not site.bot_enabled:
             if conversation.state == "bot":
                 await self._enter_callback(conversation)
             return None
-        if conversation.state != "bot":
-            return None
-        conversation.intent = classify_intent(text)
-        category = classify_sensitive(text)
-        record_trace(
-            "classification",
-            intent=conversation.intent,
-            sensitive_category=category.value,
-            chitchat=is_chitchat(text),
-            contact=is_contact_request(text),
-            explicit_human_request=is_escalate_request(text),
-        )
-        if category is not SensitiveCategory.NONE:
-            log.info(
-                "sensitive_intent",
-                conversation_id=str(conversation.id),
-                category=category.value,
-                preview=redact_for_log(text),
-            )
-            await self._commit_sensitive_refusal(conversation, site, category)
-            return None
-        if await self._handle_transfer_consent_reply(conversation, text):
-            return None
-        if is_escalate_request(text):
-            conversation.active_generation_id = None
-            await self._open_handoff(
-                conversation,
-                reason="visitor_request",
-                original_question=text,
-            )
-            return None
-        if is_contact_request(text) and site.contact_info:
-            conversation.active_generation_id = None
-            await self._insert_message(
-                conversation, "system", contact_line(list(site.contact_info))
-            )
-            return None
-        if is_chitchat(text):
-            conversation.active_generation_id = None
-            reply = chitchat_reply(text, site.contact_info, site_name=site.name)
-            if reply:
-                await self._insert_message(conversation, "system", reply)
+        if conversation.state not in BOT_ANSWERING_STATES:
             return None
         generation_id = uuid4()
         conversation.active_generation_id = generation_id
@@ -1131,95 +1094,23 @@ class ConversationService:
         conversation.generation_lease_expires_at = None
         return generation_id
 
-    async def _handle_transfer_consent_reply(self, conversation: Conversation, text: str) -> bool:
-        if not await self._awaiting_transfer_consent(conversation.id):
-            return False
-        if is_transfer_consent(text) or is_escalate_request(text):
-            conversation.active_generation_id = None
-            await self._open_handoff(
-                conversation,
-                reason="visitor_request",
-                original_question=await self._latest_offered_question(conversation.id),
-            )
-            return True
-        if is_transfer_decline(text) or is_chitchat(text):
-            conversation.active_generation_id = None
-            conversation.fallback_count = 0
-            return True
-        return False
-
     async def _awaiting_transfer_consent(self, conversation_id: UUID) -> bool:
+        """The assistant's last reply left a person on offer (judged by reply kind, not wording)."""
         recent = await self._messages.list_recent_roles(
             conversation_id, {"visitor", "bot", "system", "agent"}, 2
         )
-        if len(recent) < 2:
+        if recent and recent[-1].role == "visitor":
+            recent = recent[:-1]
+        if not recent:
             return False
-        prior = recent[-2]
-        if prior.role == "system" and is_transfer_offer_body(prior.body):
-            return True
-        if prior.role != "bot":
-            return False
-        from app.chat.outcome_copy import INSUFFICIENT_HUMAN, TECH_FAIL_HUMAN
-
-        if prior.body in {INSUFFICIENT_HUMAN, TECH_FAIL_HUMAN} or is_transfer_offer_body(
-            prior.body
-        ):
-            return True
-        lowered = (prior.body or "").casefold()
-        return "specialist" in lowered and (
-            "would you like" in lowered
-            or "connect you" in lowered
-            or "confirm it" in lowered
-            or "take it from here" in lowered
-            or "can take over" in lowered
-            or "pick up here" in lowered
-        )
+        last = recent[-1]
+        return last.role == "bot" and last.response_reason_code in OFFERED_PERSON_REASONS
 
     async def _latest_offered_question(self, conversation_id: UUID) -> str:
         recent = await self._messages.list_recent_roles(conversation_id, {"visitor"}, 2)
         if len(recent) >= 2:
             return recent[-2].body
         return await self._latest_visitor_body(conversation_id)
-
-    async def _commit_sensitive_refusal(
-        self, conversation: Conversation, site: Site, category: SensitiveCategory
-    ) -> None:
-        refusal = await lookup_refusal(self._session, site.id, category)
-        body = (
-            refusal.body
-            if refusal is not None
-            else (fallback_refusal_body(category) or SENSITIVE_LINE)
-        )
-        conversation.active_generation_id = None
-        if refusal is not None and refusal.chunk_id is not None:
-            await self._insert_message(
-                conversation,
-                "bot",
-                body,
-                source_chunk_ids=[refusal.chunk_id],
-                snapshot_id=refusal.snapshot_id,
-                system_reason="sensitive",
-                source_title="247 policy",
-                response_outcome=ResponseOutcome.BOUNDARY.value,
-                response_reason_code="policy_sensitive",
-            )
-        else:
-            await self._insert_message(
-                conversation,
-                "system",
-                body,
-                system_reason="sensitive",
-                response_outcome=ResponseOutcome.BOUNDARY.value,
-                response_reason_code="policy_sensitive",
-            )
-        await self._insert_message(
-            conversation,
-            "system",
-            transfer_offer_line(human_enabled=site.human_enabled),
-            system_reason="insufficient",
-            response_outcome=ResponseOutcome.BOUNDARY.value,
-            response_reason_code="policy_sensitive",
-        )
 
     async def run_bot_turn(
         self, conversation_id: UUID, generation_id: UUID, *, already_claimed: bool = False
@@ -1241,11 +1132,15 @@ class ConversationService:
             try:
                 conversation = await self._conversations.get_by_id(conversation_id)
                 if conversation is not None:
+                    site = await self._sites.get_by_id(conversation.site_id)
                     return await self._finalize_grounded_decision(
                         conversation_id,
                         generation_id,
                         conversation.site_id,
-                        _safe_technical_failure(reason="provider_exception"),
+                        _safe_technical_failure(
+                            reason="provider_exception",
+                            human_enabled=site is None or site.human_enabled,
+                        ),
                     )
             except Exception:
                 log.exception("bot_turn_fail_persist_failed", conversation_id=str(conversation_id))
@@ -1256,12 +1151,14 @@ class ConversationService:
         self, conversation_id: UUID, generation_id: UUID
     ) -> CommandResult | None:
         conversation = await self._conversations.get_by_id(conversation_id)
-        if conversation is None or conversation.state != "bot":
+        if conversation is None or conversation.state not in BOT_ANSWERING_STATES:
             return None
         if conversation.active_generation_id != generation_id:
             return None
         site = await self._sites.get_by_id(conversation.site_id)
         if site is None:
+            return None
+        if not site.bot_enabled and conversation.state == "queued":
             return None
         if not site.bot_enabled:
             conversation, site, site_key = await self._lock_finalize_context(
@@ -1280,8 +1177,8 @@ class ConversationService:
                     message = await self._insert_message(
                         conversation,
                         "system",
-                        transfer_offer_line(human_enabled=site.human_enabled),
-                        system_reason="insufficient",
+                        TECH_FAIL_HUMAN if site.human_enabled else TECH_FAIL_SOLO,
+                        system_reason="tech_fail",
                     )
                     await self._session.commit()
                     return CommandResult(
@@ -1294,7 +1191,7 @@ class ConversationService:
             return CommandResult(conversation=conversation, site_key=site_key)
 
         visitor_text = await self._latest_visitor_body(conversation_id)
-        # Context resolution and relevance assessment share one deadline. Leave
+        # Understanding, retrieval, drafting and assessment share one deadline. Leave
         # room to persist before another worker can reclaim the generation lease.
         async with asyncio.timeout(get_settings().bot_generation_lease_seconds * 0.75):
             prepared = await self._bot_turn.prepare(conversation, site, visitor_text)
@@ -1304,12 +1201,8 @@ class ConversationService:
             site.id,
             prepared.decision,
             stage_timings=prepared.stage_timings,
+            intent=prepared.intent,
         )
-
-    async def _retrieve_evidence(
-        self, site_id: UUID, visitor_text: str, stage_timings: dict[str, int] | None = None
-    ) -> list[EvidenceUnit]:
-        return await self._bot_turn.retrieve_evidence(site_id, visitor_text, stage_timings)
 
     async def _finalize_grounded_decision(
         self,
@@ -1319,6 +1212,7 @@ class ConversationService:
         decision: ResponseDecision,
         *,
         stage_timings: dict[str, int] | None = None,
+        intent: str | None = None,
     ) -> CommandResult | None:
         timings = stage_timings if stage_timings is not None else {}
         record_trace("decision", decision=decision, stage_timings=timings)
@@ -1327,12 +1221,12 @@ class ConversationService:
             return None
         if (
             site is None
-            or conversation.state != "bot"
+            or conversation.state not in BOT_ANSWERING_STATES
             or conversation.active_generation_id != generation_id
         ):
             await self._session.commit()
             return CommandResult(conversation=conversation, site_key=site_key)
-        if not site.enabled or not site.bot_enabled:
+        if (not site.enabled or not site.bot_enabled) and conversation.state == "bot":
             await self._enter_callback(conversation)
             await self._commit_and_schedule()
             return CommandResult(conversation=conversation, site_key=site_key)
@@ -1341,14 +1235,25 @@ class ConversationService:
             live = await self._reply_writer.citations_live(site.id, decision.citations)
             timings["liveness_check"] = (time.perf_counter_ns() - started) // 1_000_000
             if not live:
-                decision = _safe_technical_failure(reason="stale_source")
+                decision = _safe_technical_failure(
+                    reason="stale_source", human_enabled=site.human_enabled
+                )
         else:
             timings.setdefault("liveness_check", 0)
         conversation.active_generation_id = None
+        if intent:
+            conversation.intent = intent[:INTENT_MAX_LENGTH]
         started = time.perf_counter_ns()
-        inserted = await self._reply_writer.persist(conversation, decision)
-        if decision.handoff_reason:
-            # The script just sent promised a person would follow up; make that true.
+        # A handoff may need no words of its own: the handoff line is then the only message.
+        inserted = (
+            await self._reply_writer.persist(conversation, decision)
+            if decision.body.strip()
+            else None
+        )
+        if decision.cancel_handoff:
+            await self._cancel_pending_handoff(conversation)
+        elif decision.handoff_reason:
+            # The reply just sent (or the handoff line) says a person was asked; make it true.
             await self._open_handoff(
                 conversation,
                 reason=decision.handoff_reason,

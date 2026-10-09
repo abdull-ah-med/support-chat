@@ -1,5 +1,6 @@
 import json
 import uuid
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 from structlog.testing import capture_logs
@@ -11,10 +12,10 @@ from tests.bot_fixtures import (
     ADA_EMAIL,
     EASY_BODY,
     EASY_TITLE,
-    insert_article,
     insert_bot_conversation,
     insert_site,
 )
+from tests.fake_anthropic import FakeAnthropic
 from tests.ws_helpers import (
     ALEX_EMAIL,
     ALEX_PASSWORD,
@@ -61,33 +62,48 @@ async def test_visitor_message_log_has_ids_not_body_or_email(migrated_db) -> Non
     assert any(entry.get("role") == "visitor" and entry.get("length") == 25 for entry in logs)
 
 
-async def test_provider_exception_log_omits_prompt(migrated_db) -> None:
-    async def fail(prompt: str) -> str:
-        raise RuntimeError("provider exploded")
+def _turn_and_unit():
+    from app.services.grounded_response import EvidenceUnit, TurnContext
 
-    async with session_maker()() as session:
-        site = await insert_site(session, "samplesite", "SampleSite")
-        article = await insert_article(session, site, EASY_TITLE, EASY_BODY)
-        await session.commit()
+    unit = EvidenceUnit(
+        id=uuid.uuid4(),
+        canonical_question=None,
+        aliases=(),
+        topic_label=EASY_TITLE,
+        answer_verbatim=EASY_BODY,
+        source_title=EASY_TITLE,
+        source_url="https://example.test/timing",
+        snapshot_id=uuid.uuid4(),
+    )
+    return TurnContext(visitor_text=DOT_BODY, evidence=[unit], site_name="SampleSite"), unit
+
+
+async def test_provider_exception_log_omits_prompt(migrated_db) -> None:
+    turn, unit = _turn_and_unit()
     with capture_logs() as logs:
-        await BotResponder(complete=fail).generate(site, DOT_BODY, [article])
+        draft = await BotResponder(client=FakeAnthropic(fail={"draft"})).generate_grounded_draft(
+            turn, [unit]
+        )
     serialized = json.dumps(logs)
+    assert draft is None
     assert DOT_BODY not in serialized
     assert EASY_BODY not in serialized
-    assert "provider exploded" not in serialized
-    assert any(entry.get("error_class") == "RuntimeError" for entry in logs)
+    assert "scripted draft failure" not in serialized
+    assert any(entry.get("error_class") == "TimeoutError" for entry in logs)
 
 
 async def test_sdk_argument_mismatch_log_names_only_the_invalid_parameter(migrated_db) -> None:
-    async def fail(_prompt: str) -> str:
-        raise TypeError("AsyncMessages.create() got an unexpected keyword argument 'temperature'")
+    class Messages:
+        async def create(self, **_kwargs):
+            raise TypeError(
+                "AsyncMessages.create() got an unexpected keyword argument 'temperature'"
+            )
 
-    async with session_maker()() as session:
-        site = await insert_site(session, "sdk-mismatch", "SDK Mismatch")
-        article = await insert_article(session, site, EASY_TITLE, EASY_BODY)
-        await session.commit()
+    turn, unit = _turn_and_unit()
     with capture_logs() as logs:
-        await BotResponder(complete=fail).generate(site, DOT_BODY, [article])
+        await BotResponder(client=SimpleNamespace(messages=Messages())).generate_grounded_draft(
+            turn, [unit]
+        )
 
     matching = [entry for entry in logs if entry.get("event") == "provider_error"]
     assert len(matching) == 1

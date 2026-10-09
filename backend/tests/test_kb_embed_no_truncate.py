@@ -2,12 +2,8 @@ from unittest.mock import patch
 
 import pytest
 
-from app.services.kb_embedder import (
-    FakeEmbedder,
-    OpenAIEmbedder,
-    OversizeChunkError,
-    unit_vector,
-)
+from app.services.kb_embedder import OpenAIEmbedder, OversizeChunkError
+from tests.fakes import FakeEmbedder, unit_vector
 
 
 async def test_fake_embedder_sees_timing_fact_past_two_thousand_chars() -> None:

@@ -12,7 +12,7 @@ from app.models.kb_page_job import KbPageJob
 from app.models.kb_source import KbSource
 from app.settings import get_settings
 
-CONTENT_FINGERPRINT_VERSION = "source-passages-v14"
+CONTENT_FINGERPRINT_VERSION = "source-passages-v15"
 
 
 def _content_fingerprint(raw_digest: str) -> str:

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import os
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from uuid import UUID
 
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import func, literal_column, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.canned_reply import CannedReply
@@ -17,8 +17,8 @@ from app.repositories.canned_reply_repo import CannedReplyRepository
 from app.services.canned_import import has_unfilled_fields
 from app.services.grounded_response_types import ProviderStatus, ResponseDecision, ResponseOutcome
 from app.services.kb_embedder import Embedder, default_embedder, rrf_merge
-from app.services.kb_hybrid import HybridKbSearch
-from app.services.kb_tokens import WEAK_OVERLAP, search_tokens, tokenize
+from app.services.kb_hybrid import ChunkHit, HybridKbSearch, best_cosine_of
+from app.services.kb_tokens import search_tokens, tokenize, tsquery_text
 from app.services.route_decision import live_snapshots_for_site
 
 log = structlog.get_logger("canned_bot")
@@ -27,16 +27,15 @@ FTS_LIMIT = 20
 DENSE_LIMIT = 20
 CANNED_COSINE_FLOOR = 0.55
 CANNED_COSINE_GAP = 0.08
-# A visitor "yes" or "no" only means something as the answer to a question the bot just asked.
-# Scripts named after an answer (der_yes_followup) therefore match these words only when they
-# are linked to the question they follow; elsewhere the words are ignored.
-ANSWER_WORDS = frozenset({"yes", "no", "not", "sure"})
-# Phrase rewrites in tokenize() land on these tokens. A row that does not carry the topic
-# must not win just because it shares "DOT" or "report" with the question.
-CANNED_QUERY_TOPICS = frozenset({"pricing", "turnaround", "interpretation", "setup"})
+# A trigger phrase counts as said when every word of one alias is in the visitor's message
+# and those words are at least this share of the message. A longer, more specific question
+# that merely contains a phrase is left to meaning (embeddings) and the knowledge base.
+PHRASE_COVERAGE_MIN = 0.6
+# Staff wrote the trigger phrase, so a phrase match needs only a sanity floor on meaning.
+PHRASE_COSINE_FLOOR = 0.25
+MAX_QUERY_TOKENS = 24
 HANDOFF_REASON = "individual_case"
 _SPACE = re.compile(r"[ \t]{2,}")
-_COLLISION_SUFFIX = re.compile(r"-\d+$")
 
 
 @dataclass(frozen=True)
@@ -50,11 +49,14 @@ class CannedHit:
     aliases: tuple[str, ...] = ()
     follow_up: bool = False
     hands_off: bool = False
+    # Share of the visitor's words taken up by the best-matching alias phrase (0 if none).
+    phrase_coverage: float = 0.0
 
 
-def canned_embed_text(shortcut: str, aliases: list[str], body: str) -> str:
-    keys = " ".join([shortcut, *aliases])
-    return f"{keys}\n{body}"
+def canned_embed_text(aliases: list[str] | tuple[str, ...], body: str) -> str:
+    """What a reply answers: the phrases that trigger it, then its body. Never its slug."""
+    phrases = " | ".join(alias for alias in aliases if alias)
+    return f"{phrases}\n{body}" if phrases else body
 
 
 def fill_canned_variables(
@@ -75,89 +77,60 @@ def fill_canned_variables(
     return "\n".join(line.rstrip() for line in filled.splitlines()).strip()
 
 
-def _shortcut_key_text(shortcut: str, aliases: list[str] | tuple[str, ...]) -> str:
-    primary = _COLLISION_SUFFIX.sub("", shortcut)
-    return " ".join((primary.replace("_", " ").replace("-", " "), *aliases))
-
-
-def _key_tokens(shortcut: str, aliases: list[str] | tuple[str, ...], follow_up: bool) -> set[str]:
-    keys = set(tokenize(_shortcut_key_text(shortcut, aliases)))
-    return keys if follow_up else keys - ANSWER_WORDS
-
-
-def lexical_shortcut_match(
-    visitor_text: str, shortcut: str, aliases: list[str], follow_up: bool = False
-) -> bool:
+def phrase_coverage(visitor_text: str, aliases: list[str] | tuple[str, ...]) -> float:
+    """How completely the visitor's message is one of the reply's trigger phrases."""
     query = set(tokenize(visitor_text))
-    keys = _key_tokens(shortcut, aliases, follow_up)
-    strong = (query & keys) - WEAK_OVERLAP
-    return bool(strong)
-
-
-def lexical_specificity(
-    visitor_text: str,
-    shortcut: str,
-    aliases: list[str] | tuple[str, ...],
-    follow_up: bool = False,
-) -> float:
-    keys = _key_tokens(shortcut, aliases, follow_up)
-    if not keys:
+    if not query:
         return 0.0
-    query = set(tokenize(visitor_text))
-    strong = (query & keys) - WEAK_OVERLAP
-    if not strong:
-        return 0.0
-    return len(strong) / len(keys)
+    best = 0.0
+    for alias in aliases:
+        words = set(tokenize(alias))
+        if words and words <= query:
+            best = max(best, len(words) / len(query))
+    return best
 
 
-def pick_canned_winner(
-    hits: list[CannedHit], *, best_kb_cosine: float | None, visitor_text: str
-) -> CannedHit | None:
+def pick_canned_winner(hits: list[CannedHit], *, best_kb_cosine: float | None) -> CannedHit | None:
+    """Choose the one reply that clearly answers the message, or none.
+
+    Evidence is what a reply answers (its trigger phrases and body), never its slug:
+    a message that is one of its trigger phrases wins outright; otherwise the nearest
+    by meaning wins only with a clear margin over the runner-up and over the knowledge base.
+    """
     if not hits:
         return None
-    lexical = [hit for hit in hits if decisive_lexical_hit(hit, visitor_text)]
-    if lexical:
-        return max(lexical, key=lambda hit: _lexical_rank(hit, visitor_text))
-    scored = [hit for hit in hits if hit.cosine is not None]
+    said = sorted(
+        (hit for hit in hits if hit.phrase_coverage >= PHRASE_COVERAGE_MIN),
+        key=lambda hit: (-hit.phrase_coverage, -(hit.cosine or 0.0), str(hit.id)),
+    )
+    if said:
+        top = said[0]
+        tied = [hit for hit in said[1:] if hit.phrase_coverage >= top.phrase_coverage]
+        sane = top.cosine is None or top.cosine >= PHRASE_COSINE_FLOOR
+        if sane and not any(_close(top, other) for other in tied):
+            return top
+    scored = sorted(
+        (hit for hit in hits if hit.cosine is not None),
+        key=lambda hit: (-(hit.cosine or 0.0), str(hit.id)),
+    )
     if not scored:
         return None
-    ranked = sorted(scored, key=lambda hit: (-hit.cosine, str(hit.id)))
-    best = ranked[0]
+    best = scored[0]
     if best.cosine is None or best.cosine < CANNED_COSINE_FLOOR:
         return None
     if best_kb_cosine is not None and best.cosine <= best_kb_cosine:
         return None
-    second = ranked[1] if len(ranked) > 1 else None
-    next_cosine = second.cosine if second is not None and second.cosine is not None else 0.0
-    if best.cosine - next_cosine < CANNED_COSINE_GAP:
+    runner_up = scored[1].cosine if len(scored) > 1 else None
+    if runner_up is not None and best.cosine - runner_up < CANNED_COSINE_GAP:
         return None
     return best
 
 
-def decisive_lexical_hit(hit: CannedHit, visitor_text: str) -> bool:
-    if not hit.lexical:
-        return False
-    keys = _key_tokens(hit.shortcut, hit.aliases, hit.follow_up)
-    topics = set(tokenize(visitor_text)) & CANNED_QUERY_TOPICS
-    if topics and not (topics & keys):
-        return False
-    if lexical_specificity(visitor_text, hit.shortcut, hit.aliases, hit.follow_up) >= 0.5:
+def _close(first: CannedHit, second: CannedHit) -> bool:
+    """Two replies the message names equally well; only meaning can separate them."""
+    if first.cosine is None or second.cosine is None:
         return True
-    return len(set(tokenize(visitor_text))) <= 2
-
-
-def _lexical_rank(hit: CannedHit, visitor_text: str) -> tuple[float, float]:
-    spec = lexical_specificity(visitor_text, hit.shortcut, hit.aliases, hit.follow_up)
-    similarity = hit.cosine if hit.cosine is not None else 0.0
-    return (spec * (1.0 + similarity), hit.rrf)
-
-
-def canned_embedder() -> Embedder:
-    if os.environ.get("PYTEST_CURRENT_TEST"):
-        from app.services.kb_embedder import FakeEmbedder
-
-        return FakeEmbedder()
-    return default_embedder()
+    return abs(first.cosine - second.cosine) < CANNED_COSINE_GAP
 
 
 async def refresh_canned_embedding(reply: CannedReply, embedder: Embedder) -> None:
@@ -166,7 +139,7 @@ async def refresh_canned_embedding(reply: CannedReply, embedder: Embedder) -> No
         reply.embedder_id = None
         return
     vectors = await embedder.embed_documents(
-        [canned_embed_text(reply.shortcut, list(reply.aliases or []), reply.body)]
+        [canned_embed_text(list(reply.aliases or []), reply.body)]
     )
     reply.embedding = vectors[0]
     reply.embedder_id = embedder.embedder_id
@@ -175,7 +148,7 @@ async def refresh_canned_embedding(reply: CannedReply, embedder: Embedder) -> No
 async def embed_replies(replies: list[CannedReply], embedder: Embedder | None = None) -> None:
     if not replies:
         return
-    worker = embedder if embedder is not None else canned_embedder()
+    worker = embedder if embedder is not None else default_embedder()
     pending = [reply for reply in replies if reply.enabled and reply.bot_eligible]
     for reply in replies:
         if reply not in pending:
@@ -185,10 +158,7 @@ async def embed_replies(replies: list[CannedReply], embedder: Embedder | None = 
         return
     try:
         vectors = await worker.embed_documents(
-            [
-                canned_embed_text(reply.shortcut, list(reply.aliases or []), reply.body)
-                for reply in pending
-            ]
+            [canned_embed_text(list(reply.aliases or []), reply.body) for reply in pending]
         )
         for reply, vector in zip(pending, vectors, strict=True):
             reply.embedding = vector
@@ -249,6 +219,7 @@ async def search_canned(
         session, eligible_ids, query_vector, embedder.embedder_id
     )
     ranked = rrf_merge(fts_ids, dense_ids)
+    lexical_ids = set(fts_ids)
     hits: list[CannedHit] = []
     seen: set[UUID] = set()
     for reply_id, rrf in ranked:
@@ -256,13 +227,13 @@ async def search_canned(
         if row is None:
             continue
         seen.add(reply_id)
-        hits.append(_to_hit(row, rrf, cosine_by_id.get(reply_id), visitor_text))
+        hits.append(_to_hit(row, rrf, cosine_by_id.get(reply_id), visitor_text, lexical_ids))
+    # A message that is itself a trigger phrase counts even when neither arm ranked the row.
     for row in rows:
         if row.id in seen:
             continue
-        follow_up = row.follows_id is not None
-        if lexical_shortcut_match(visitor_text, row.shortcut, list(row.aliases or []), follow_up):
-            hits.append(_to_hit(row, 0.0, cosine_by_id.get(row.id), visitor_text))
+        if phrase_coverage(visitor_text, list(row.aliases or [])) >= PHRASE_COVERAGE_MIN:
+            hits.append(_to_hit(row, 0.0, cosine_by_id.get(row.id), visitor_text, lexical_ids))
     return hits
 
 
@@ -273,14 +244,19 @@ async def canned_reply_decision(
     visitor_text: str,
     visitor: Visitor | None,
     previous_locator: str | None = None,
+    *,
+    kb_hits: Sequence[ChunkHit] | None = None,
 ) -> ResponseDecision | None:
+    """A canned reply that clearly answers the message, else ``None``.
+
+    ``kb_hits`` are the hits of a knowledge search already run for this message; passing
+    them spares a second search when the reply must beat the knowledge base.
+    """
     hits = await search_canned(session, embedder, site_id, visitor_text, previous_locator)
     if not hits:
         return None
-    best_kb_cosine = None
-    if not any(decisive_lexical_hit(hit, visitor_text) for hit in hits):
-        best_kb_cosine = await _best_kb_cosine(session, embedder, site_id, visitor_text)
-    winner = pick_canned_winner(hits, best_kb_cosine=best_kb_cosine, visitor_text=visitor_text)
+    best_kb_cosine = await _best_kb_cosine(session, embedder, site_id, visitor_text, kb_hits)
+    winner = pick_canned_winner(hits, best_kb_cosine=best_kb_cosine)
     if winner is None:
         return None
     log.info("canned_turn", canned_id=str(winner.id), shortcut=winner.shortcut)
@@ -307,9 +283,9 @@ async def inspect_canned_search(
 ) -> dict[str, object]:
     hits = await search_canned(session, embedder, site_id, visitor_text)
     best_kb_cosine = None
-    if hits and not any(decisive_lexical_hit(hit, visitor_text) for hit in hits):
-        best_kb_cosine = await _best_kb_cosine(session, embedder, site_id, visitor_text)
-    winner = pick_canned_winner(hits, best_kb_cosine=best_kb_cosine, visitor_text=visitor_text)
+    if hits:
+        best_kb_cosine = await _best_kb_cosine(session, embedder, site_id, visitor_text, None)
+    winner = pick_canned_winner(hits, best_kb_cosine=best_kb_cosine)
     return {
         "winner": None if winner is None else winner.shortcut,
         "best_kb_cosine": best_kb_cosine,
@@ -326,21 +302,25 @@ async def inspect_canned_search(
 
 
 def _to_hit(
-    row: CannedReply, rrf: float, cosine_score: float | None, visitor_text: str
+    row: CannedReply,
+    rrf: float,
+    cosine_score: float | None,
+    visitor_text: str,
+    lexical_ids: set[UUID],
 ) -> CannedHit:
-    follow_up = row.follows_id is not None
+    aliases = tuple(row.aliases or [])
+    coverage = phrase_coverage(visitor_text, aliases)
     return CannedHit(
         id=row.id,
         shortcut=row.shortcut,
         body=row.body,
         rrf=rrf,
         cosine=cosine_score,
-        aliases=tuple(row.aliases or []),
-        lexical=lexical_shortcut_match(
-            visitor_text, row.shortcut, list(row.aliases or []), follow_up
-        ),
-        follow_up=follow_up,
+        aliases=aliases,
+        lexical=row.id in lexical_ids or coverage > 0.0,
+        follow_up=row.follows_id is not None,
         hands_off=row.hands_off,
+        phrase_coverage=coverage,
     )
 
 
@@ -355,18 +335,21 @@ async def _query_vector(embedder: Embedder, visitor_text: str) -> list[float] | 
 async def _fts_ids(
     session: AsyncSession, visitor_text: str, eligible_ids: list[UUID]
 ) -> list[UUID]:
-    tokens = search_tokens(visitor_text)
+    tokens = search_tokens(visitor_text)[:MAX_QUERY_TOKENS]
     if not tokens:
         return []
-    ts = func.websearch_to_tsquery("english", " OR ".join(tokens))
-    rank = func.ts_rank(CannedReply.search_document, ts)
+    simple = literal_column("'simple'::regconfig")
+    any_term = func.to_tsquery(simple, tsquery_text(tokens, "|"))
+    all_terms = func.to_tsquery(simple, tsquery_text(tokens, "&"))
+    matches_all = CannedReply.search_document.op("@@")(all_terms)
+    rank = func.ts_rank_cd(CannedReply.search_document, any_term, 1)
     result = await session.execute(
         select(CannedReply.id)
         .where(
             CannedReply.id.in_(eligible_ids),
-            CannedReply.search_document.op("@@")(ts),
+            CannedReply.search_document.op("@@")(any_term),
         )
-        .order_by(rank.desc(), CannedReply.id)
+        .order_by(matches_all.desc(), rank.desc(), CannedReply.id)
         .limit(FTS_LIMIT)
     )
     return list(result.scalars().all())
@@ -406,12 +389,14 @@ async def _best_kb_cosine(
     embedder: Embedder,
     site_id: UUID,
     visitor_text: str,
+    kb_hits: Sequence[ChunkHit] | None,
 ) -> float | None:
+    """Closeness of the best knowledge passage, from hits the caller already holds if any."""
+    if kb_hits is not None:
+        reported = getattr(kb_hits, "best_cosine", None)
+        return reported if reported is not None else best_cosine_of(kb_hits)
     snapshots = await live_snapshots_for_site(session, site_id)
     if not snapshots:
         return None
     hits = await HybridKbSearch(session).search_with_deferred_embed(embedder, site_id, visitor_text)
-    scores = [hit.cosine for hit in hits if hit.cosine is not None]
-    if not scores:
-        return None
-    return max(scores)
+    return hits.best_cosine

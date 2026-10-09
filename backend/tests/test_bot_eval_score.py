@@ -1,5 +1,9 @@
-from app.chat.outcome_copy import OFF_TOPIC_LINE, TRANSFER_OFFER, WAITING_LINE
 from app.services.bot_eval import EvalCase, ObservedReply, score_case
+
+# The scorer compares text it is given; these stand in for whatever copy a site's reply uses.
+OFF_TOPIC_LINE = "That is outside what I can help with here."
+TRANSFER_OFFER = "I do not have that. May I connect you with a representative?"
+WAITING_LINE = "A specialist will join this chat shortly."
 
 
 def test_off_topic_passes_on_canned_line_and_stays_bot() -> None:

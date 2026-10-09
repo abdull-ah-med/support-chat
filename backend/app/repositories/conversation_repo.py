@@ -64,7 +64,7 @@ class ConversationRepository:
         conversation = await self.lock_by_id(conversation_id)
         if (
             conversation is None
-            or conversation.state != "bot"
+            or conversation.state not in ("bot", "queued")
             or conversation.active_generation_id != generation_id
             or (
                 conversation.generation_lease_expires_at is not None
@@ -85,7 +85,7 @@ class ConversationRepository:
         result = await self._session.execute(
             select(Conversation)
             .where(
-                Conversation.state == "bot",
+                Conversation.state.in_(("bot", "queued")),
                 Conversation.active_generation_id.is_not(None),
                 or_(
                     Conversation.generation_lease_expires_at <= now,

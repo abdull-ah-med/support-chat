@@ -17,3 +17,5 @@ class EvidenceUnit:
     structured_text: str | None = None
     enabled: bool = True
     review_note: str | None = None
+    # Ancestor section titles ending with ``heading``; gives a chunk its place on the page.
+    heading_path: tuple[str, ...] = ()

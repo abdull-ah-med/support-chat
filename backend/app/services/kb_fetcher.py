@@ -13,11 +13,11 @@ from app.services.kb_crawl import (
     MAX_BYTES,
     FetchError,
     allowed_fetch_url,
+    crawler_user_agent,
     pinned_get,
     public_fetch_url,
 )
 
-USER_AGENT = "SupportChatBot/1.0 (+https://sample-site.example.com/bots)"
 _BROWSER_MARKERS = (
     "playwright",
     "executable doesn't exist",
@@ -374,7 +374,7 @@ async def page_crawler(allowed_hosts: set[str]) -> AsyncIterator[CrawlerFn]:
     browser = BrowserConfig(
         browser_type="chromium",
         headless=True,
-        user_agent=USER_AGENT,
+        user_agent=crawler_user_agent(),
         extra_args=[
             "--disable-features=ServiceWorker",
             "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",

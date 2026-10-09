@@ -20,7 +20,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.models.base import Base
 
 INQUIRY_TYPES = ("sales", "results", "portal", "compliance", "other")
-INTENTS = ("pricing", "turnaround", "dot", "fcra", "portal", "escalate", "other")
+INTENT_MAX_LENGTH = 64  # free-text topic label; the vocabulary comes from the site, not code
 STATES = ("prechat", "bot", "queued", "human", "closed")
 ESCALATION_REASONS = (
     "visitor_request",
@@ -54,11 +54,11 @@ class Conversation(Base):
             name="ck_conversations_inquiry",
         ),
         CheckConstraint(
-            "intent IS NULL OR intent IN ('pricing','turnaround','dot','fcra','portal','escalate','other')",
-            name="ck_conversations_intent",
+            f"intent IS NULL OR char_length(intent) <= {INTENT_MAX_LENGTH}",
+            name="ck_conversations_intent_length",
         ),
         CheckConstraint(
-            "(active_generation_id IS NULL) OR (state = 'bot')",
+            "(active_generation_id IS NULL) OR (state IN ('bot','queued'))",
             name="ck_conversations_generation_bot_only",
         ),
         CheckConstraint(

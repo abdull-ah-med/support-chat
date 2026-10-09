@@ -39,6 +39,11 @@ BODY_MAX = 40_000
 ENABLED_TEXT_MAX = 5 * 1024 * 1024
 CONTACT_INFO_MAX_ITEMS = 10
 CONTACT_INFO_ITEM_MAX = 160
+ASSISTANT_SCOPE_MAX = 2000
+HANDOFF_TOPICS_MAX_ITEMS = 20
+HANDOFF_TOPIC_MAX = 200
+LANGUAGE_RE = re.compile(r"^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$")
+LANGUAGE_MAX = 35
 
 
 class AdminError(Exception):
@@ -125,6 +130,36 @@ def _contact_info(raw: list[str] | None) -> list[str]:
     return cleaned
 
 
+def _assistant_scope(raw: str) -> str:
+    return _plain(raw, ASSISTANT_SCOPE_MAX, empty_ok=True)
+
+
+def _handoff_topics(raw: list[str]) -> list[str]:
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        text = " ".join((item or "").split())
+        if not text:
+            continue
+        if len(text) > HANDOFF_TOPIC_MAX:
+            raise AdminError("invalid")
+        key = text.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(text)
+    if len(cleaned) > HANDOFF_TOPICS_MAX_ITEMS:
+        raise AdminError("too_large")
+    return cleaned
+
+
+def _primary_language(raw: str) -> str:
+    text = raw.strip()
+    if len(text) > LANGUAGE_MAX or LANGUAGE_RE.fullmatch(text) is None:
+        raise AdminError("invalid")
+    return text
+
+
 def validate_site_origin(raw: str, *, production: bool) -> str:
     origin = canonicalize_origins([raw])[0]
     if production and not origin.startswith("https://"):
@@ -192,6 +227,9 @@ class SiteAdminService:
         origins: list[str] | None,
         website_url: str | None = None,
         contact_info: list[str] | None = None,
+        assistant_scope: str | None = None,
+        handoff_topics: list[str] | None = None,
+        primary_language: str | None = None,
         admin: User | None = None,
     ) -> Site:
         clean_name = _plain(name, NAME_MAX)
@@ -205,6 +243,9 @@ class SiteAdminService:
                 raise AdminError("conflict")
         clean_website_url = _website_url(website_url) if website_url else None
         clean_contact_info = _contact_info(contact_info)
+        clean_scope = _assistant_scope(assistant_scope if assistant_scope is not None else "")
+        clean_topics = _handoff_topics(handoff_topics or [])
+        clean_language = _primary_language("en" if primary_language is None else primary_language)
         site = await self._sites.create(
             key=slug,
             name=clean_name,
@@ -215,6 +256,9 @@ class SiteAdminService:
         )
         site.website_url = clean_website_url
         site.contact_info = clean_contact_info
+        site.assistant_scope = clean_scope
+        site.handoff_topics = clean_topics
+        site.primary_language = clean_language
         await self._session.commit()
         if clean_website_url is not None:
             await self._build_kb_from_website(site, admin)
@@ -275,6 +319,9 @@ class SiteAdminService:
         origins: list[str] | None,
         website_url: str | None = None,
         contact_info: list[str] | None = None,
+        assistant_scope: str | None = None,
+        handoff_topics: list[str] | None = None,
+        primary_language: str | None = None,
         enabled: bool | None = None,
         bot_enabled: bool | None = None,
         human_enabled: bool | None = None,
@@ -293,6 +340,12 @@ class SiteAdminService:
             site.allowed_origins = _origins(origins)
         if contact_info is not None:
             site.contact_info = _contact_info(contact_info)
+        if assistant_scope is not None:
+            site.assistant_scope = _assistant_scope(assistant_scope)
+        if handoff_topics is not None:
+            site.handoff_topics = _handoff_topics(handoff_topics)
+        if primary_language is not None:
+            site.primary_language = _primary_language(primary_language)
         if website_url is not None:
             next_website_url = _website_url(website_url) if website_url.strip() else None
             if next_website_url != site.website_url:

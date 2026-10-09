@@ -96,12 +96,15 @@ class ConversationQueries:
         counts = await self._conversations.count_inbox_by_state(site_id)
         return items, next_cursor, counts, sites
 
-    async def list_submissions(self, offset: int, limit: int | None) -> tuple[list[dict], bool]:
+    async def list_submissions(
+        self, offset: int, limit: int | None, site_id: UUID | None = None
+    ) -> tuple[list[dict], bool]:
         page_size = SUBMISSIONS_PAGE if limit is None else min(max(limit, 1), SUBMISSIONS_PAGE)
         start = max(offset, 0)
         rows = await self._conversations.list_submissions(
             offset=start,
             limit=page_size + 1,
+            site_id=site_id,
         )
         extra = rows[page_size:]
         page = rows[:page_size]

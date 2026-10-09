@@ -1,15 +1,13 @@
-import json
 import uuid
-from types import SimpleNamespace
 
 from sqlalchemy import select
 
 from app.db import session_maker
+from app.llm.bot_responder import BotResponder
 from app.llm.prompts import document_body
 from app.models.message import Message
 from app.repositories.site_repo import SiteRepository
 from app.services.conversation_service import ConversationService
-from app.services.kb_embedder import FakeEmbedder
 from app.services.kb_search import KbSearch
 from tests.bot_fixtures import (
     EASY_BODY,
@@ -24,62 +22,9 @@ from tests.bot_fixtures import (
     insert_bot_conversation,
     seed_brand_articles,
 )
+from tests.fake_anthropic import Draft, FakeAnthropic
+from tests.fakes import FakeEmbedder
 from tests.ws_helpers import HOST_ORIGIN, message_count
-
-
-def _fake_anthropic(captured: dict, answer: str = SCRIPTED_ANSWER):
-    class FakeMessages:
-        async def create(self, **kwargs):
-            stage = kwargs.get("tool_choice", {}).get("name")
-            if stage:
-                payload = json.loads(kwargs["messages"][-1]["content"])
-                value = (
-                    {
-                        "query": payload["latest_message"],
-                        "relation": "standalone",
-                        "intent": "information",
-                        "ambiguity": "",
-                    }
-                    if stage == "resolve_request"
-                    else {"status": "answered", "reason": "responsive"}
-                )
-                return SimpleNamespace(
-                    stop_reason="tool_use",
-                    content=[SimpleNamespace(type="tool_use", name=stage, input=value)],
-                )
-            captured.update(kwargs)
-
-            # Documents are EvidenceUnit-like; cited_text must match the redacted body.
-            docs = []
-            for message in kwargs.get("messages") or []:
-                content = message.get("content")
-                if isinstance(content, list):
-                    for block in content:
-                        if isinstance(block, dict) and block.get("type") == "document":
-                            docs.append(block["source"]["data"])
-            source = docs[0] if docs else answer
-            citation = type(
-                "Citation",
-                (),
-                {
-                    "document_index": 0,
-                    "start_char_index": 0,
-                    "end_char_index": len(source),
-                    "cited_text": source,
-                },
-            )()
-            block = type("Block", (), {"type": "text", "text": answer, "citations": [citation]})()
-            return type("Response", (), {"content": [block], "_request_id": "req_test"})()
-
-    class FakeClient:
-        def __init__(self, *args, **kwargs) -> None:
-            captured["client_kwargs"] = kwargs
-            self.messages = FakeMessages()
-
-        async def close(self) -> None:
-            captured["closed"] = True
-
-    return FakeClient
 
 
 async def test_samplesite_paraphrase_selects_timing_article_and_prompt_excludes_fcra(
@@ -125,7 +70,7 @@ async def test_verification_checks_same_query_never_receives_samplesite_source(
     assert message_count(conversation_id, role="system", body=FALLBACK) == 0
     assert message_count(conversation_id, role="system", body=SCRIPTED_ANSWER) == 0
     assert message_count(conversation_id, body=EASY_BODY) == 0
-    assert responder.calls == []
+    assert responder.draft_calls() == []
 
 
 async def test_scripted_grounded_answer_writes_one_bot_row_with_samplesite_article_id(
@@ -149,8 +94,8 @@ async def test_scripted_grounded_answer_writes_one_bot_row_with_samplesite_artic
         conversation_id = conversation.id
         timing_id = timing.chunk_id
 
-    assert len(responder.calls) == 1
-    assert responder.calls[0]["article_ids"] == [timing_id]
+    assert len(responder.draft_calls()) == 1
+    assert responder.draft_calls()[0]["article_ids"] == [timing_id]
     assert message_count(conversation_id, role="bot", body=SCRIPTED_ANSWER) == 1
     assert message_count(conversation_id, role="bot") == 1
     async with session_maker()() as session:
@@ -165,7 +110,11 @@ async def test_scripted_grounded_answer_writes_one_bot_row_with_samplesite_artic
 
 
 async def test_injection_cannot_add_foreign_articles(migrated_db) -> None:
-    responder = RecordingResponder(answer=SCRIPTED_ANSWER)
+    # The model reads the message as an injection attempt: a boundary reply, no draft.
+    responder = RecordingResponder(
+        answer=SCRIPTED_ANSWER,
+        understand={"intent": "prompt_injection", "reply": "I can only help with this site."},
+    )
     async with session_maker()() as session:
         easy, _bg, timing, _fcra = await seed_brand_articles(session)
         visitor, conversation = await insert_bot_conversation(session, easy)
@@ -217,21 +166,11 @@ async def test_injection_cannot_add_foreign_articles(migrated_db) -> None:
             row.response_outcome == "boundary" or (row.source_chunk_ids or []) == [timing_id]
             for row in bots
         )
-    assert responder.calls == []
+    assert responder.draft_calls() == []
 
 
-async def test_default_responder_persists_recorded_anthropic_answer(
-    migrated_db, monkeypatch
-) -> None:
-    captured: dict = {}
-    monkeypatch.setenv("ANTHROPIC_MODEL", "claude-opus-4-8")
-    from app.settings import reset_settings_cache
-
-    reset_settings_cache()
-    monkeypatch.setattr(
-        "app.llm.bot_responder.AsyncAnthropic", _fake_anthropic(captured), raising=False
-    )
-
+async def test_default_responder_persists_recorded_anthropic_answer(migrated_db) -> None:
+    client = FakeAnthropic(draft=Draft(SCRIPTED_ANSWER, EASY_BODY))
     async with session_maker()() as session:
         easy, _bg, timing, _fcra = await seed_brand_articles(session)
         visitor, conversation = await insert_bot_conversation(session, easy)
@@ -239,7 +178,9 @@ async def test_default_responder_persists_recorded_anthropic_answer(
         conversation_id = conversation.id
         visitor_id = visitor.id
         timing_id = timing.chunk_id
-        service = ConversationService(session, embedder=FakeEmbedder())
+        service = ConversationService(
+            session, responder=BotResponder(client=client), embedder=FakeEmbedder()
+        )
         result = await service.visitor_message(
             conversation_id,
             visitor_id,
@@ -250,11 +191,10 @@ async def test_default_responder_persists_recorded_anthropic_answer(
         assert result.generation_id is not None
         await service.run_bot_turn(conversation_id, result.generation_id)
 
-    assert captured["model"] == "claude-opus-4-8"
-    assert captured.get("stream") is not True
-    assert "SupportChat assistant" in str(captured.get("system") or "")
-    # The Anthropic client is application-lifetime scoped and closes at FastAPI shutdown.
-    assert captured.get("closed") is not True
+    # Only the requesting site's evidence reaches the provider.
+    documents = client.stage_calls("draft")[0]["messages"]
+    assert EASY_BODY in str(documents)
+    assert FCRA_BODY not in str(documents)
     assert message_count(conversation_id, role="bot", body=SCRIPTED_ANSWER) == 1
     assert message_count(conversation_id, role="bot") == 1
     async with session_maker()() as session:
@@ -266,35 +206,3 @@ async def test_default_responder_persists_recorded_anthropic_answer(
             )
         ).scalar_one()
         assert list(row.source_chunk_ids) == [timing_id]
-
-
-async def test_sdk_model_id_comes_from_anthropic_model_env(migrated_db, monkeypatch) -> None:
-    captured: dict = {}
-    monkeypatch.setenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
-    from app.settings import reset_settings_cache
-
-    reset_settings_cache()
-    monkeypatch.setattr(
-        "app.llm.bot_responder.AsyncAnthropic", _fake_anthropic(captured), raising=False
-    )
-
-    async with session_maker()() as session:
-        easy, _bg, _timing, _fcra = await seed_brand_articles(session)
-        visitor, conversation = await insert_bot_conversation(session, easy)
-        await session.commit()
-        conversation_id = conversation.id
-        visitor_id = visitor.id
-        service = ConversationService(session, embedder=FakeEmbedder())
-        result = await service.visitor_message(
-            conversation_id,
-            visitor_id,
-            HOST_ORIGIN,
-            uuid.uuid4(),
-            FAST_QUERY,
-        )
-        assert result.generation_id is not None
-        await service.run_bot_turn(conversation_id, result.generation_id)
-
-    assert captured["model"] == "claude-sonnet-4-6"
-    assert captured.get("stream") is not True
-    assert message_count(conversation_id, role="bot", body=SCRIPTED_ANSWER) == 1

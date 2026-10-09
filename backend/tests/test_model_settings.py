@@ -65,41 +65,6 @@ async def test_embed_documents_sends_the_configured_model(monkeypatch) -> None:
     assert vectors == [[0.1, 0.0]]
 
 
-async def test_bot_responder_uses_supported_sdk_parameters_and_fixed_token_cap(monkeypatch) -> None:
-    captured: dict = {}
-
-    class FakeMessages:
-        async def create(self, *, model, max_tokens, system, messages):
-            captured.update(
-                model=model,
-                max_tokens=max_tokens,
-                system=system,
-                messages=messages,
-            )
-            block = type(
-                "Block", (), {"type": "text", "text": f"{EASY_BODY}\nSOURCES: {TIMING_ID}"}
-            )()
-            return type("Response", (), {"content": [block]})()
-
-    class FakeClient:
-        def __init__(self, *args, **kwargs) -> None:
-            self.messages = FakeMessages()
-
-        async def close(self) -> None:
-            return None
-
-    monkeypatch.setenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
-    monkeypatch.setenv("ANTHROPIC_MAX_TOKENS", "400")
-    monkeypatch.setattr("app.llm.bot_responder.AsyncAnthropic", FakeClient, raising=False)
-    hit = SimpleNamespace(
-        id=TIMING_ID, title="Turnaround", heading="Turnaround", body=EASY_BODY, url=""
-    )
-    answer = await BotResponder().generate(SimpleNamespace(name="SampleSite"), "how fast", [hit])
-    assert captured["model"] == "claude-haiku-4-5-20251001"
-    assert captured["max_tokens"] == 400
-    assert answer.accepted is True
-
-
 async def test_grounded_responder_uses_the_installed_sdk_request_contract(monkeypatch) -> None:
     captured: dict = {}
     paraphrase = "Most negative results come back within 24-48 hours."
@@ -128,6 +93,8 @@ async def test_grounded_responder_uses_the_installed_sdk_request_contract(monkey
         async def close(self) -> None:
             return None
 
+    monkeypatch.setenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
+    monkeypatch.setenv("ANTHROPIC_MAX_TOKENS", "400")
     monkeypatch.setattr("app.llm.bot_responder.AsyncAnthropic", FakeClient, raising=False)
     evidence = EvidenceUnit(
         id=TIMING_ID,
@@ -148,5 +115,6 @@ async def test_grounded_responder_uses_the_installed_sdk_request_contract(monkey
     assert draft.body == paraphrase
     assert draft.citations[0].source_title == evidence.source_title
     assert draft.citations[0].source_url == evidence.source_url
-    assert captured["max_tokens"] == 500
+    assert captured["model"] == "claude-haiku-4-5-20251001"
+    assert captured["max_tokens"] == 400
     assert set(captured) == {"model", "max_tokens", "system", "messages"}

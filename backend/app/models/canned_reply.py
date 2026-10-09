@@ -20,10 +20,10 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
 
+# A reply is found by what it answers (aliases, body), never by its shortcut slug.
 SEARCH_DOCUMENT_SQL = (
-    "setweight(to_tsvector('english', coalesce(shortcut, '')), 'A') || "
-    "setweight(to_tsvector('english', canned_aliases_as_text(aliases)), 'A') || "
-    "setweight(to_tsvector('english', coalesce(body, '')), 'B')"
+    "setweight(to_tsvector('simple', workspace_search_fold(canned_aliases_as_text(aliases))), 'A') || "
+    "setweight(to_tsvector('simple', workspace_search_fold(coalesce(body, ''))), 'B')"
 )
 
 

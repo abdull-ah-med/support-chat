@@ -1,25 +1,11 @@
-"""Injection and output-leak markers for Plan 12 guardrails."""
+"""Language- and domain-neutral guards: PII shapes, output leaks, document injection markers."""
 
 from __future__ import annotations
 
 import re
-from enum import StrEnum
 
-
-class SensitiveCategory(StrEnum):
-    NONE = "none"
-    SSN = "ssn"
-    DL = "driver_license"
-    PLATE = "plate"
-    DOB = "dob"
-    MRN = "mrn"
-    SPECIMEN = "specimen_id"
-    INDIVIDUAL_RESULT = "individual_result"
-    MEDICAL_DETAIL = "medical_detail"
-    LEGAL_CASE = "legal_case"
-
-
-# Applied to visitor text and every retrieved document body BEFORE generation.
+# Applied to every retrieved knowledge document body BEFORE generation (defense in depth).
+# Visitor text is never classified with keyword lists: the model judges what it means.
 INJECTION_MARKERS = (
     "ignore previous instructions",
     "ignore prior instructions",
@@ -63,6 +49,11 @@ OUTPUT_PII_PATTERNS = (
     ),  # US phone
 )
 
+# The first four OUTPUT_PII_PATTERNS are personal identifiers (SSN, 9 digits, licence number,
+# ISO date of birth). Their presence in a visitor message is a structural fact, not an opinion
+# about the words around it.
+_IDENTIFIER_LABELS = ("ssn", "digits_9", "licence_number", "date_of_birth")
+
 ZERO_WIDTH_RE = re.compile(r"[\u200b\u200c\u200d\u2060\ufeff\u00ad]")
 
 
@@ -73,3 +64,29 @@ def contains_injection_marker(text: str) -> bool:
 
 def strip_invisible(text: str) -> str:
     return ZERO_WIDTH_RE.sub("", text or "")
+
+
+def structured_identifier_kinds(text: str) -> list[str]:
+    """Labels of identifier-shaped values in visitor text (empty when there are none)."""
+    cleaned = strip_invisible(text or "")
+    return [
+        label
+        for label, pattern in zip(_IDENTIFIER_LABELS, OUTPUT_PII_PATTERNS, strict=False)
+        if pattern.search(cleaned)
+    ]
+
+
+IDENTIFIER_MASK = "[REDACTED]"
+
+
+def mask_identifiers(text: str) -> str:
+    """Replace identifier-shaped values (SSN, 9-digit numbers, licence numbers, dates of birth)
+    so the stored visitor message never holds them. Contact details are left alone."""
+    cleaned = strip_invisible(text or "")
+    for pattern in OUTPUT_PII_PATTERNS[: len(_IDENTIFIER_LABELS)]:
+        cleaned = pattern.sub(IDENTIFIER_MASK, cleaned)
+    return cleaned
+
+
+def has_identifier_mask(text: str) -> bool:
+    return IDENTIFIER_MASK in (text or "")

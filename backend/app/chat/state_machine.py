@@ -11,6 +11,8 @@ _TRANSITIONS: dict[tuple[str | None, str], str] = {
     ("bot", "escalate"): "queued",
     ("bot", "join"): "human",
     ("queued", "visitor_message"): "queued",
+    ("queued", "bot_reply"): "queued",
+    ("queued", "cancel_handoff"): "bot",
     ("queued", "join"): "human",
     ("queued", "close_attention"): "closed",
     ("human", "visitor_message"): "human",

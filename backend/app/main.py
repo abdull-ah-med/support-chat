@@ -11,6 +11,8 @@ from app.api.canned_replies import router as canned_replies_router
 from app.api.conversations import router as conversations_router
 from app.api.health import router as health_router
 from app.api.internal_dev import router as internal_dev_router
+from app.api.internal_harness import harness_enabled
+from app.api.internal_harness import prepare as prepare_internal_harness
 from app.api.kb_sources import router as kb_sources_router
 from app.api.knowledge_gaps import router as knowledge_gaps_router
 from app.api.logs import router as logs_router
@@ -32,13 +34,14 @@ from app.redis import close_redis
 from app.security.surfaces import http_surface_allowed
 from app.services.app_log import record_app_log
 from app.services.kb_embedder import OpenAIEmbedder
-from app.settings import AppEnvironment, get_settings
+from app.settings import AppEnvironment, get_settings, require_provider_credentials
 from app.workers import start_kb_workers, stop_kb_workers
 
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     settings = get_settings()
+    require_provider_credentials(settings)
     await start_fanout()
     if settings.enable_background_workers:
         await start_kb_workers()
@@ -84,11 +87,18 @@ def _include_internal_dev_router(application: FastAPI) -> None:
         application.include_router(internal_dev_router)
 
 
+def _include_internal_harness_router(application: FastAPI) -> None:
+    # TEMPORARY local chatbot harness; off unless INTERNAL_DEV_HARNESS is set.
+    if harness_enabled():
+        application.include_router(prepare_internal_harness())
+
+
 def create_app() -> FastAPI:
     configure_logging()
     application = FastAPI(title="SupportChat", lifespan=lifespan)
     application.include_router(health_router)
     _include_internal_dev_router(application)
+    _include_internal_harness_router(application)
     application.include_router(auth_router, prefix="/auth")
     application.include_router(widget_bootstrap_router)
     application.include_router(conversations_router)

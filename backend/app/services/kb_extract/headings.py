@@ -33,11 +33,16 @@ def parse_headings(tree: _Element, url: str) -> list[EvidenceUnit]:
     headings = [
         node for node in root.iter() if _heading_level(node) is not None and not _inside_skip(node)
     ]
+    trail: list[tuple[int, str]] = []
     for index, heading in enumerate(headings):
         level = _heading_level(heading) or 2
         title = tidy_inline(_node_text(heading))
         if not title:
             continue
+        while trail and trail[-1][0] >= level:
+            trail.pop()
+        trail.append((level, title))
+        path = tuple(name for _, name in trail)
         stop = None
         for nxt in headings[index + 1 :]:
             nxt_level = _heading_level(nxt) or 2
@@ -55,6 +60,7 @@ def parse_headings(tree: _Element, url: str) -> list[EvidenceUnit]:
                 answer_verbatim=body,
                 body_for_search=f"{title}\n{body}",
                 display_locator=locator_for(url, title),
+                heading_path=path,
             )
         )
     return units
