@@ -9,6 +9,7 @@ import {
   canonicalizeOriginLines,
 } from "@/lib/validation"
 
+import { isProfileDirty, languageError, profileOf } from "./assistant-profile"
 import { saveManageSite } from "./manage-site-save"
 import { useLeaveGuard } from "./sites-form"
 import { useSiteValidation } from "./use-site-validation"
@@ -47,17 +48,20 @@ export const useManageSiteForm = (
   const [originsText, setOriginsText] = useState(site.origins.join("\n"))
   const [contactInfoText, setContactInfoText] = useState((site.contact_info ?? []).join("\n"))
   const [windowHours, setWindowHours] = useState(site.callback_window_hours ?? 24)
+  const [profile, setProfile] = useState(() => profileOf(site))
   const [errors, setErrors] = useState<Record<string, string>>({})
 
-  const dirty = isManageSiteDirty(site, {
-    name,
-    greeting,
-    privacyUrl,
-    websiteUrl,
-    originsText,
-    contactInfoText,
-    windowHours,
-  })
+  const dirty =
+    isProfileDirty(site, profile) ||
+    isManageSiteDirty(site, {
+      name,
+      greeting,
+      privacyUrl,
+      websiteUrl,
+      originsText,
+      contactInfoText,
+      windowHours,
+    })
 
   const { leaveOpen, requestClose, handleStay, handleLeave } = useLeaveGuard(dirty, onClose)
   const { handleNameBlur, handlePrivacyBlur, handleOriginsBlur, handleWebsiteUrlBlur, validate } =
@@ -102,6 +106,15 @@ export const useManageSiteForm = (
     }
     setWindowHours(Math.min(168, Math.max(1, next)))
   }, [])
+  const handleLanguageBlur = useCallback(() => {
+    setErrors((current) => {
+      const next = { ...current }
+      const problem = languageError(profile.language)
+      if (problem) next.primaryLanguage = problem
+      else delete next.primaryLanguage
+      return next
+    })
+  }, [profile.language])
   const handleOpenChange = useCallback(
     (next: boolean) => {
       if (!next) {
@@ -111,7 +124,7 @@ export const useManageSiteForm = (
     [requestClose],
   )
   const handleSave = useCallback(async () => {
-    const nextErrors = validate()
+    const nextErrors = { ...validate(), primaryLanguage: languageError(profile.language) }
     const visibleErrors = Object.fromEntries(
       Object.entries(nextErrors).filter((entry): entry is [string, string] => entry[1] !== null),
     )
@@ -121,7 +134,16 @@ export const useManageSiteForm = (
     }
     await saveManageSite(
       site.id,
-      { name, greeting, privacyUrl, websiteUrl, originsText, contactInfoText, windowHours },
+      {
+        name,
+        greeting,
+        privacyUrl,
+        websiteUrl,
+        originsText,
+        contactInfoText,
+        windowHours,
+        profile,
+      },
       onSaved,
       onError,
     )
@@ -133,6 +155,7 @@ export const useManageSiteForm = (
     onSaved,
     originsText,
     privacyUrl,
+    profile,
     site.id,
     validate,
     websiteUrl,
@@ -146,6 +169,7 @@ export const useManageSiteForm = (
     originsText,
     contactInfoText,
     windowHours,
+    profile,
     errors,
     leaveOpen,
     requestClose,
@@ -158,6 +182,8 @@ export const useManageSiteForm = (
     handleOrigins,
     handleContactInfo,
     handleWindow,
+    setProfile,
+    handleLanguageBlur,
     handleNameBlur,
     handlePrivacyBlur: handlePrivacyFieldBlur,
     handleWebsiteUrlBlur: handleWebsiteUrlFieldBlur,

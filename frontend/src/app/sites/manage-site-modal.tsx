@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/dialog"
 import { ScrollArea } from "@/components/ui/scroll-area"
 
+import { ManageSiteAssistant } from "./manage-site-assistant"
 import { ManageSiteFields, ManageSiteSnippet } from "./manage-site-fields"
 import { ManageSiteRouting } from "./manage-site-routing"
 import { OffBrandEditor } from "./off-brand-editor"
@@ -87,6 +88,14 @@ export const ManageSiteModal = ({
                 onPrivacyBlur={form.handlePrivacyBlur}
                 onWebsiteUrlBlur={form.handleWebsiteUrlBlur}
                 onOriginsBlur={form.handleOriginsBlur}
+              />
+              <ManageSiteAssistant
+                siteId={site.id}
+                isAdmin={isAdmin}
+                profile={form.profile}
+                languageProblem={form.errors.primaryLanguage}
+                onProfile={form.setProfile}
+                onLanguageBlur={form.handleLanguageBlur}
               />
               <ManageSiteRouting
                 site={site}
