@@ -36,13 +36,18 @@ class VisitorBlockRepository:
     async def get_by_id(self, block_id: UUID) -> VisitorBlock | None:
         return await self._session.get(VisitorBlock, block_id)
 
-    async def list_with_names(self) -> list[tuple[VisitorBlock, str, str]]:
-        result = await self._session.execute(
+    async def list_with_names(
+        self, site_id: UUID | None = None
+    ) -> list[tuple[VisitorBlock, str, str]]:
+        statement = (
             select(VisitorBlock, Site.name, User.display_name)
             .join(Site, Site.id == VisitorBlock.site_id)
             .join(User, User.id == VisitorBlock.created_by)
             .order_by(VisitorBlock.created_at.desc(), VisitorBlock.id.desc())
         )
+        if site_id is not None:
+            statement = statement.where(VisitorBlock.site_id == site_id)
+        result = await self._session.execute(statement)
         return [
             (block, site_name, created_by_name)
             for block, site_name, created_by_name in result.all()

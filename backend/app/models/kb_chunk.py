@@ -23,11 +23,20 @@ from app.models.base import Base
 
 EMBEDDING_DIM = 1536
 
+# Language-neutral: 'simple' over accent-folded text (workspace_search_fold, migration 56).
 SEARCH_DOCUMENT_SQL = (
-    "setweight(to_tsvector('english', coalesce(canonical_question, '')), 'A') || "
-    "setweight(to_tsvector('english', kb_aliases_as_text(aliases)), 'A') || "
-    "setweight(to_tsvector('english', coalesce(heading, '')), 'B') || "
-    "setweight(to_tsvector('english', coalesce(body, '')), 'C')"
+    "setweight(to_tsvector('simple', workspace_search_fold(coalesce(canonical_question, ''))), 'A') || "
+    "setweight(to_tsvector('simple', workspace_search_fold(kb_aliases_as_text(aliases))), 'A') || "
+    "setweight(to_tsvector('simple', workspace_search_fold(coalesce(heading, ''))), 'B') || "
+    "setweight(to_tsvector('simple', workspace_search_fold(coalesce(body, ''))), 'C')"
+)
+TRIGRAM_EXPRESSION = (
+    "workspace_search_fold("
+    "coalesce(canonical_question, '') || ' ' || "
+    "kb_aliases_as_text(aliases) || ' ' || "
+    "coalesce(heading, '') || ' ' || "
+    "coalesce(topic_label, '')"
+    ")"
 )
 
 
@@ -45,21 +54,9 @@ class KbChunk(Base):
         ),
         Index(
             "ix_kb_chunks_grounded_trgm",
-            text(
-                "lower("
-                "coalesce(canonical_question, '') || ' ' || "
-                "kb_aliases_as_text(aliases) || ' ' || "
-                "coalesce(heading, '') || ' ' || "
-                "coalesce(topic_label, '')"
-                ")"
-            ),
+            text(TRIGRAM_EXPRESSION),
             postgresql_using="gin",
-            postgresql_ops={
-                "lower(coalesce(canonical_question, '') || ' ' || "
-                "kb_aliases_as_text(aliases) || ' ' || "
-                "coalesce(heading, '') || ' ' || "
-                "coalesce(topic_label, ''))": "gin_trgm_ops"
-            },
+            postgresql_ops={TRIGRAM_EXPRESSION: "gin_trgm_ops"},
         ),
         CheckConstraint(
             "kind IN ('faq','section','table','definition','prose','refusal','fact')",
