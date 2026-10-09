@@ -5,12 +5,7 @@ import { describe, expect, test } from "vitest"
 
 import { renderWithProviders } from "@/test/render"
 
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogTitle,
-} from "./dialog"
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "./dialog"
 
 const DialogFixture = () => {
   const [open, setOpen] = useState(false)
