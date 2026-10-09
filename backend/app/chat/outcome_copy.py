@@ -1,147 +1,41 @@
-"""Per-outcome visitor copy for grounded serving and human handoff."""
+"""Fixed system copy for handoff and failure states.
+
+Deliberately small, brand-neutral and domain-neutral. Conversational replies (greetings,
+redirects, boundaries, "I don't know") are written by the model in the visitor's language;
+only text that no model call can produce lives here.
+"""
 
 from __future__ import annotations
 
-WAITING_LINE = "A specialist will join this chat shortly."
+WAITING_LINE = (
+    "A specialist has been asked to join this chat. You can keep asking questions while you wait."
+)
 CALLBACK_LINE = "A representative will contact you in 24 hours."
-TRANSFER_OFFER = (
-    "Sorry, I can't answer this question, may I transfer you to one of our representatives?"
-)
-CONTACT_OFFER = (
-    "I want to get you an accurate answer. "
-    "Would you like to be contacted by one of our representatives?"
-)
-KEEP_HELPING_LINE = "I can help with screening and compliance questions here. What do you need?"
-CLARIFY_SCOPE_LINE = "What would you like to know about screening or compliance?"
-GREET_LINE = "Hi. I can help with screening and compliance questions. What do you need?"
-THANKS_LINE = "You're welcome. Anything else on screening or compliance?"
-BYE_LINE = "Take care. Come back if you have screening or compliance questions."
-PRODUCTS_CLARIFY_LINE = "What would you like to know about our products or services?"
-PRODUCTS_GREET_LINE = "Hi. How can we help you today?"
-PRODUCTS_THANKS_LINE = "You're welcome. Anything else I can help with?"
-PRODUCTS_BYE_LINE = "Take care. Come back if you have more questions."
-PRODUCTS_KEEP_HELPING_LINE = (
-    "I can help with questions about our products and services. What do you need?"
-)
-DISENGAGE_LINE = "Sorry, I can't engage in this. If you don't have anymore questions I am going to close this chat now"
-OFF_TOPIC_LINE = "I can't help with that here."
+KEEP_HELPING_LINE = "I'm still here to help. What would you like to know?"
 
-INSUFFICIENT_HUMAN = "I want to get you an accurate answer. A specialist can pick up here."
-INSUFFICIENT_SOLO = "I want to get you an accurate answer."
-TECH_FAIL_HUMAN = "Sorry, I hit a temporary issue. A specialist can take it from here."
-TECH_FAIL_SOLO = "Sorry, I hit a temporary issue. We'll follow up shortly."
-POLICY_BOUNDARY = (
-    "I can't share that in chat. A specialist can walk you through it in the right channel."
+# Last resort when the model's own "I don't know" text is unusable. Still honest, still neutral.
+INSUFFICIENT_HUMAN = (
+    "I don't have verified information on that. Would you like me to ask a specialist to join?"
 )
+INSUFFICIENT_SOLO = "I don't have verified information on that."
+TECH_FAIL_HUMAN = (
+    "Sorry, I hit a temporary issue. Please try again, or I can ask a specialist to join."
+)
+TECH_FAIL_SOLO = "Sorry, I hit a temporary issue. Please try again in a moment."
+POLICY_BOUNDARY = "I can't share that in chat. A specialist has been asked to walk you through it."
 OUT_OF_SCOPE = "I can't help with that here."
 
-VISITOR_REQUEST_HUMAN = WAITING_LINE
-SENSITIVE_HUMAN = "A specialist can help through a secure channel."
-INDIVIDUAL_CASE_HUMAN = "A specialist is required to discuss an individual's case. Joining you now."
+SENSITIVE_HUMAN = "A specialist has been asked to help through a secure channel."
+INDIVIDUAL_CASE_HUMAN = (
+    "A specialist is required to discuss an individual's case and has been asked to join this chat."
+)
 RETRIEVAL_MISS_HUMAN = INSUFFICIENT_HUMAN
 SUFFICIENCY_FAIL_HUMAN = (
     "I don't have enough information here to answer that safely. A specialist can help."
 )
 PROVIDER_TIMEOUT_HUMAN = TECH_FAIL_HUMAN
-REPEATED_MISS_HUMAN = "Let me hand you to a specialist so you don't have to repeat yourself."
-RATE_CEILING_HUMAN = "I've hit a temporary limit. A specialist can take over now."
-OFF_TOPIC_HUMAN = OUT_OF_SCOPE
-
-_LEGACY_OUTCOMES = frozenset({"insufficient", "tech_fail", "policy_boundary", "out_of_scope"})
-_GREET_TOKENS = frozenset(
-    {
-        "hi",
-        "hello",
-        "hey",
-        "yo",
-        "hiya",
-        "howdy",
-        "morning",
-        "afternoon",
-        "evening",
-        "welcome",
-    }
-)
-_THANKS_TOKENS = frozenset({"thanks", "thank", "cheers", "np"})
-_BYE_TOKENS = frozenset({"bye", "goodbye", "cya", "later", "goodnight"})
-
-
-def uses_screening_scope(site_name: str) -> bool:
-    text = (site_name or "").casefold()
-    return "samplesite" in text or "screening" in text or "verification check" in text
-
-
-def clarify_scope_line(site_name: str = "") -> str:
-    if uses_screening_scope(site_name):
-        return CLARIFY_SCOPE_LINE
-    return PRODUCTS_CLARIFY_LINE
-
-
-def greet_line(site_name: str = "") -> str:
-    if uses_screening_scope(site_name):
-        return GREET_LINE
-    return PRODUCTS_GREET_LINE
-
-
-def thanks_line(site_name: str = "") -> str:
-    if uses_screening_scope(site_name):
-        return THANKS_LINE
-    return PRODUCTS_THANKS_LINE
-
-
-def keep_helping_line(site_name: str = "") -> str:
-    if uses_screening_scope(site_name):
-        return KEEP_HELPING_LINE
-    return PRODUCTS_KEEP_HELPING_LINE
-
-
-def injection_boundary_line(site_name: str = "") -> str:
-    if uses_screening_scope(site_name):
-        return "I can help with screening and compliance questions. What would you like to know?"
-    return "I can help with questions about our products and services. What would you like to know?"
-
-
-def abuse_boundary_line(site_name: str = "") -> str:
-    if uses_screening_scope(site_name):
-        return (
-            "I'm here to help with screening and compliance questions. "
-            "We can continue when the conversation stays respectful."
-        )
-    return "I'm here to help. We can continue when the conversation stays respectful."
-
-
-def contact_line(contact_info: list[str]) -> str:
-    items = [item for item in contact_info if item]
-    if len(items) <= 1:
-        joined = items[0] if items else ""
-    else:
-        joined = ", ".join(items[:-1]) + f" or {items[-1]}"
-    return f"You can also reach us at {joined}."
-
-
-def bye_line(contact_info: list[str] | None = None, *, site_name: str = "") -> str:
-    base = BYE_LINE if uses_screening_scope(site_name) else PRODUCTS_BYE_LINE
-    items = [item for item in (contact_info or []) if item]
-    if not items:
-        return base
-    return f"{base} {contact_line(items)}"
-
-
-def chitchat_reply(
-    text: str, contact_info: list[str] | None = None, *, site_name: str = ""
-) -> str | None:
-    from app.services.kb_tokens import tokenize
-
-    tokens = set(tokenize(text))
-    if not tokens:
-        return None
-    if tokens <= _GREET_TOKENS:
-        return greet_line(site_name)
-    if tokens <= _THANKS_TOKENS:
-        return thanks_line(site_name)
-    if tokens <= _BYE_TOKENS:
-        return bye_line(contact_info, site_name=site_name)
-    return None
+REPEATED_MISS_HUMAN = "I've asked a specialist to join so you don't have to repeat yourself."
+RATE_CEILING_HUMAN = "I've hit a temporary limit. I've asked a specialist to join."
 
 
 def callback_line(window_hours: int) -> str:
@@ -152,32 +46,9 @@ def callback_line(window_hours: int) -> str:
     return f"A representative will contact you in {hours} {unit}."
 
 
-def transfer_offer_line(*, human_enabled: bool) -> str:
-    if human_enabled:
-        return TRANSFER_OFFER
-    return CONTACT_OFFER
-
-
-def is_transfer_offer_body(body: str) -> bool:
-    return body in {TRANSFER_OFFER, CONTACT_OFFER}
-
-
-def follow_up_line(*, human_enabled: bool, window_hours: int = 24) -> str:
-    if human_enabled:
-        return WAITING_LINE
-    return callback_line(window_hours)
-
-
-def visitor_copy(
-    outcome: str,
-    *,
-    human_enabled: bool,
-    window_hours: int = 24,
-) -> str:
-    """Return visitor-facing copy for a sufficiency or escalation outcome."""
-    if outcome in _LEGACY_OUTCOMES:
-        return _legacy_copy(outcome, human_enabled=human_enabled, window_hours=window_hours)
-    return handoff_copy(outcome, human_enabled=human_enabled, window_hours=window_hours)
+def contact_block(contact_info: list[str] | tuple[str, ...] | None) -> str:
+    """The configured contact route, verbatim, one entry per line (empty when none is set)."""
+    return "\n".join(item.strip() for item in (contact_info or ()) if item and item.strip())
 
 
 def handoff_copy(  # noqa: C901
@@ -198,7 +69,7 @@ def handoff_copy(  # noqa: C901
     if reason == "retrieval_miss":
         if human_enabled:
             return RETRIEVAL_MISS_HUMAN
-        return "I want to get you an accurate answer. " + callback
+        return "I don't have verified information on that. " + callback
     if reason == "sufficiency_fail":
         if human_enabled:
             return SUFFICIENCY_FAIL_HUMAN
@@ -210,7 +81,7 @@ def handoff_copy(  # noqa: C901
     if reason == "repeated_miss":
         if human_enabled:
             return REPEATED_MISS_HUMAN
-        return "Let me hand you to a specialist so you don't have to repeat yourself. " + callback
+        return "I'm passing this on so you don't have to repeat yourself. " + callback
     if reason == "policy_boundary":
         if human_enabled:
             return POLICY_BOUNDARY
@@ -220,23 +91,5 @@ def handoff_copy(  # noqa: C901
             return RATE_CEILING_HUMAN
         return "I've hit a temporary limit. " + callback
     if reason == "off_topic":
-        return OFF_TOPIC_LINE
+        return OUT_OF_SCOPE
     raise ValueError(f"unsupported handoff copy: {reason}")
-
-
-def _legacy_copy(outcome: str, *, human_enabled: bool, window_hours: int) -> str:
-    if outcome == "insufficient":
-        return handoff_copy(
-            "retrieval_miss", human_enabled=human_enabled, window_hours=window_hours
-        )
-    if outcome == "tech_fail":
-        return handoff_copy(
-            "provider_timeout", human_enabled=human_enabled, window_hours=window_hours
-        )
-    if outcome == "policy_boundary":
-        return handoff_copy(
-            "policy_boundary", human_enabled=human_enabled, window_hours=window_hours
-        )
-    if outcome == "out_of_scope":
-        return handoff_copy("off_topic", human_enabled=human_enabled, window_hours=window_hours)
-    raise ValueError(f"unsupported outcome copy: {outcome}")

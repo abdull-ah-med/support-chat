@@ -142,7 +142,7 @@ async def test_repeat_visitor_client_id_creates_one_row_and_at_most_one_provider
     assert second.duplicate is True
     assert message_count(conversation_id, role="visitor", body=FAST_QUERY) == 1
     assert message_count(conversation_id, role="bot", body=SCRIPTED_ANSWER) == 1
-    assert len(responder.calls) == 1
+    assert len(responder.draft_calls()) == 1
 
 
 STILL_WAITING = "what is the turnaround time"

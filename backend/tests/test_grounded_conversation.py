@@ -14,7 +14,6 @@ from app.services.grounded_response import (
     ResponseDecision,
     ResponseOutcome,
 )
-from app.services.kb_embedder import FakeEmbedder
 from app.services.site_admin import SiteAdminService
 from tests.bot_fixtures import (
     RecordingGroundedResponder,
@@ -22,8 +21,12 @@ from tests.bot_fixtures import (
     insert_chunk,
     insert_site,
 )
+from tests.fake_anthropic import UNKNOWN_REPLY, ScriptedResponder
+from tests.fakes import FakeEmbedder, MappedEmbedder
 from tests.ws_helpers import HOST_ORIGIN
 
+# The visitor says "drug" (or misspells it); the passage's embedding sits on the same axis.
+DRUG_EMBEDDER = MappedEmbedder({"drug": 3, "durg": 3})
 PARAPHRASE_BODY = "Yes. We handle DOT drug and alcohol testing."
 ANSWER_VERBATIM = (
     "We support DOT drug and alcohol testing, random pool management, and DOT physicals."
@@ -56,7 +59,7 @@ async def test_yes_no_factual_answer_commits_message_and_citation(migrated_db) -
         responder.source_title = page.title
         responder.source_url = page.url
 
-        service = ConversationService(session, responder=responder, embedder=FakeEmbedder())
+        service = ConversationService(session, responder=responder, embedder=DRUG_EMBEDDER)
         result = await service.visitor_message(
             conversation.id,
             visitor.id,
@@ -91,7 +94,7 @@ async def test_yes_no_factual_answer_commits_message_and_citation(migrated_db) -
     assert citations[0].response_end == len(PARAPHRASE_BODY)
 
 
-async def test_small_corpus_retrieves_only_the_exact_live_unit(migrated_db) -> None:
+async def test_small_corpus_retrieves_the_exact_live_unit_first(migrated_db) -> None:
     async with session_maker()() as session:
         site = await insert_site(session, "small-corpus-site", "Small Corpus Site")
         chunks = [
@@ -128,8 +131,9 @@ async def test_small_corpus_retrieves_only_the_exact_live_unit(migrated_db) -> N
         assert result.generation_id is not None
         await service.run_bot_turn(conversation.id, result.generation_id)
 
-    assert len(responder.calls) == 1
-    assert responder.calls[0]["document_ids"] == [selected.id]
+    assert len(responder.draft_calls()) == 1
+    # The word-for-word match leads; lexical neighbours may ride along as context.
+    assert responder.draft_calls()[0]["document_ids"][0] == selected.id
 
 
 async def test_misspelled_durg_screening_retrieves_same_evidence(migrated_db) -> None:
@@ -144,7 +148,7 @@ async def test_misspelled_durg_screening_retrieves_same_evidence(migrated_db) ->
         visitor, conversation = await insert_bot_conversation(session, site)
         await session.commit()
 
-        class CiteRetrieved:
+        class CiteRetrieved(ScriptedResponder):
             async def generate_grounded_draft(self, turn, documents, **_kwargs):
                 del turn
                 unit = documents[0]
@@ -166,7 +170,7 @@ async def test_misspelled_durg_screening_retrieves_same_evidence(migrated_db) ->
                     ],
                 )
 
-        service = ConversationService(session, responder=CiteRetrieved(), embedder=FakeEmbedder())
+        service = ConversationService(session, responder=CiteRetrieved(), embedder=DRUG_EMBEDDER)
         result = await service.visitor_message(
             conversation.id,
             visitor.id,
@@ -209,7 +213,7 @@ async def test_stale_source_at_commit_discards_draft(migrated_db) -> None:
         page_title = page.title
         page_url = page.url
 
-    class StaleThenRespond:
+    class StaleThenRespond(ScriptedResponder):
         async def generate_grounded_draft(self, turn, documents, **_kwargs):
             del turn, documents
             from app.models.kb_chunk import KbChunk
@@ -238,9 +242,7 @@ async def test_stale_source_at_commit_discards_draft(migrated_db) -> None:
             )
 
     async with session_maker()() as session:
-        service = ConversationService(
-            session, responder=StaleThenRespond(), embedder=FakeEmbedder()
-        )
+        service = ConversationService(session, responder=StaleThenRespond(), embedder=DRUG_EMBEDDER)
         result = await service.visitor_message(
             conversation_id,
             visitor_id,
@@ -305,7 +307,7 @@ async def test_bot_disabled_during_generation_never_saves_draft(migrated_db) -> 
         cited_text=ANSWER_VERBATIM,
     )
     async with session_maker()() as session:
-        service = ConversationService(session, responder=responder, embedder=FakeEmbedder())
+        service = ConversationService(session, responder=responder, embedder=DRUG_EMBEDDER)
         accepted = await service.visitor_message(
             conversation_id, visitor_id, HOST_ORIGIN, uuid.uuid4(), "Do you provide drug screening?"
         )
@@ -364,7 +366,7 @@ async def test_finalizer_state_guard_drops_stale_generation(migrated_db) -> None
                 )
             ],
         )
-        service = ConversationService(session, embedder=FakeEmbedder())
+        service = ConversationService(session, embedder=DRUG_EMBEDDER)
         await service._finalize_grounded_decision(
             conversation.id,
             uuid.uuid4(),  # different generation id
@@ -414,7 +416,7 @@ async def test_no_reaches_retrieval_after_assistant_question(migrated_db) -> Non
         )
         await session.commit()
 
-        service = ConversationService(session, embedder=FakeEmbedder())
+        service = ConversationService(session, embedder=DRUG_EMBEDDER)
         result = await service.visitor_message(
             conversation.id,
             visitor.id,
@@ -466,7 +468,7 @@ async def test_grounded_turn_log_contains_expected_timing_keys(migrated_db) -> N
             cited_text=ANSWER_VERBATIM,
             request_id="req_timing_test",
         )
-        service = ConversationService(session, responder=responder, embedder=FakeEmbedder())
+        service = ConversationService(session, responder=responder, embedder=DRUG_EMBEDDER)
         with capture_logs() as events:
             result = await service.visitor_message(
                 conversation.id,
@@ -504,6 +506,7 @@ async def test_grounded_turn_log_contains_expected_timing_keys(migrated_db) -> N
     assert isinstance(timings, dict)
     expected_timing_keys = {
         "history_load",
+        "understand",
         "lexical_retrieve",
         "trigram_retrieve",
         "dense_retrieve",
@@ -535,12 +538,12 @@ async def test_no_citation_never_persists_provider_claim(migrated_db) -> None:
         visitor, conversation = await insert_bot_conversation(session, site)
         await session.commit()
 
-        class UncitedDraft:
+        class UncitedDraft(ScriptedResponder):
             async def generate_grounded_draft(self, turn, documents, **_kwargs):
                 del turn, documents
                 return ModelDraft(body=uncited_body, citations=[], request_id="req_no_cite")
 
-        service = ConversationService(session, responder=UncitedDraft(), embedder=FakeEmbedder())
+        service = ConversationService(session, responder=UncitedDraft(), embedder=DRUG_EMBEDDER)
         result = await service.visitor_message(
             conversation.id,
             visitor.id,
@@ -565,10 +568,7 @@ async def test_no_citation_never_persists_provider_claim(migrated_db) -> None:
         )
 
     assert message is not None
-    assert (
-        message.body
-        == "I couldn't verify an accurate answer to that question. A specialist can help."
-    )
+    assert message.body == UNKNOWN_REPLY
     assert uncited_body not in message.body
     assert message.system_reason == "insufficient"
     assert message.response_reason_code == "grounding_reject"

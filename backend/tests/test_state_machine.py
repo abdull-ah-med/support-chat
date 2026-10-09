@@ -11,6 +11,8 @@ LEGAL = [
     ("bot", "escalate", "queued"),
     ("bot", "join", "human"),
     ("queued", "visitor_message", "queued"),
+    ("queued", "bot_reply", "queued"),
+    ("queued", "cancel_handoff", "bot"),
     ("queued", "join", "human"),
     ("queued", "close_attention", "closed"),
     ("human", "visitor_message", "human"),
@@ -33,10 +35,18 @@ def test_join_from_bot_becomes_human() -> None:
     assert apply_event("bot", "join") == "human"
 
 
-def test_bot_reply_is_illegal_outside_bot() -> None:
-    for state in ("queued", "human", "closed", "prechat", None):
+def test_bot_reply_is_legal_only_while_the_assistant_answers() -> None:
+    """The assistant answers in bot and queued (a person was asked but has not joined); never
+    once a person owns the chat (human) or after it closed."""
+    for state in ("human", "closed", "prechat", None):
         with pytest.raises(IllegalTransition):
             apply_event(state, "bot_reply")
+
+
+def test_cancel_handoff_is_only_for_a_queued_chat() -> None:
+    for state in (None, "prechat", "bot", "human", "closed"):
+        with pytest.raises(IllegalTransition):
+            apply_event(state, "cancel_handoff")
 
 
 def test_agent_message_is_illegal_outside_human() -> None:

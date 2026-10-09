@@ -280,7 +280,7 @@ def test_identical_embedding_is_a_perfect_canned_match(client):
     from app.db import session_maker
     from app.models.canned_reply import CannedReply
     from app.services.canned_bot import search_canned
-    from app.services.kb_embedder import FakeEmbedder
+    from tests.fakes import FakeEmbedder
 
     site_id, _ = seed_demo_world()
 

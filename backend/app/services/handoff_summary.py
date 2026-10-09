@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from typing import NoReturn
 from uuid import UUID
 
 import structlog
@@ -18,9 +19,19 @@ from app.settings import get_settings
 
 log = structlog.get_logger("handoff_summary")
 
-SUMMARY_FALLBACK = "(auto-summary unavailable in this environment)"
 SUMMARY_MAX_CHARS = 800
 TRANSCRIPT_LIMIT = 12
+
+
+class SummaryUnavailable(Exception):
+    """No summary could be produced; the handoff keeps an empty summary."""
+
+
+def _unavailable(handoff_id: UUID, reason: str, started: float) -> NoReturn:
+    elapsed_ms = round((time.perf_counter() - started) * 1000)
+    log.error("handoff_summary_unavailable", handoff_id=str(handoff_id), reason=reason)
+    record_trace("handoff_summary", status="failed", reason=reason, elapsed_ms=elapsed_ms)
+    raise SummaryUnavailable(reason)
 
 
 async def generate(
@@ -35,23 +46,7 @@ async def generate(
     model = (settings.haiku_model or settings.anthropic_model).strip()
     started = time.perf_counter()
     if not settings.anthropic_api_key:
-        await HandoffRepository(session).update_summary(handoff_id, SUMMARY_FALLBACK, "")
-        log.info(
-            "handoff_summary",
-            handoff_id=str(handoff_id),
-            model="",
-            elapsed_ms=0,
-            output_len=len(SUMMARY_FALLBACK),
-        )
-        record_trace(
-            "handoff_summary",
-            status="fallback",
-            reason="provider_not_configured",
-            body=SUMMARY_FALLBACK,
-            model="",
-            elapsed_ms=0,
-        )
-        return SUMMARY_FALLBACK
+        return _unavailable(handoff_id, "provider_not_configured", started)
 
     transcript = await _transcript_block(session, conversation_id)
     prompt = HANDOFF_SUMMARY_PROMPT.format(
@@ -63,16 +58,14 @@ async def generate(
     if not summary:
         summary = await _call_haiku(prompt, model=model, timeout=settings.haiku_timeout, attempt=2)
     if not summary:
-        summary = SUMMARY_FALLBACK
-        model_stored = ""
-    else:
-        model_stored = model
-        if len(summary) > SUMMARY_MAX_CHARS:
-            summary = summary[:SUMMARY_MAX_CHARS]
+        return _unavailable(handoff_id, "provider_failed", started)
+    model_stored = model
+    if len(summary) > SUMMARY_MAX_CHARS:
+        summary = summary[:SUMMARY_MAX_CHARS]
     await HandoffRepository(session).update_summary(handoff_id, summary, model_stored)
     record_trace(
         "handoff_summary",
-        status="completed" if model_stored else "fallback",
+        status="completed",
         body=summary,
         model=model_stored,
         elapsed_ms=round((time.perf_counter() - started) * 1000),

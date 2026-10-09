@@ -163,6 +163,20 @@ class HandoffService:
         )
         return row
 
+    async def withdraw(self, conversation_id: UUID) -> HandoffContext | None:
+        """Close the open handoff because the visitor withdrew the request (no staff involved)."""
+        existing = await self._handoffs.get_latest_for_conversation(conversation_id)
+        if existing is None or await self._handoffs.get_outcome(existing.id) is not None:
+            return None
+        await self._handoffs.create_outcome(
+            handoff_id=existing.id,
+            resolved_by=None,
+            outcome="abandoned",
+            note="Withdrawn by the visitor",
+        )
+        record_trace("handoff", withdrawn=existing.id)
+        return existing
+
     def trace_summary_queued(self, row: HandoffContext) -> None:
         record_trace("handoff_summary", status="queued", handoff_id=row.id, persisted=True)
 
@@ -230,26 +244,35 @@ class HandoffService:
         row = await self._handoffs.get_by_id(handoff_id)
         if row is None:
             raise HandoffError("not_found")
-        await handoff_summary.generate(
-            self._session,
-            handoff_id=row.id,
-            conversation_id=row.conversation_id,
-            original_question=row.original_question,
-            escalation_reason=row.escalation_reason,
-        )
+        try:
+            await handoff_summary.generate(
+                self._session,
+                handoff_id=row.id,
+                conversation_id=row.conversation_id,
+                original_question=row.original_question,
+                escalation_reason=row.escalation_reason,
+            )
+        except handoff_summary.SummaryUnavailable:
+            pass  # already logged; the handoff simply shows no summary
         refreshed = await self._handoffs.get_by_id(handoff_id)
         if refreshed is None:
             raise HandoffError("not_found")
         return refreshed
 
-    async def candidate_labels(self, unit_ids: list[UUID]) -> dict[UUID, dict]:
+    async def candidate_labels(
+        self, unit_ids: list[UUID], site_id: UUID | None = None
+    ) -> dict[UUID, dict]:
         if not unit_ids:
             return {}
         from sqlalchemy import select
 
         from app.models.kb_chunk import KbChunk
 
-        result = await self._session.execute(select(KbChunk).where(KbChunk.id.in_(unit_ids)))
+        statement = select(KbChunk).where(KbChunk.id.in_(unit_ids))
+        if site_id is not None:
+            # A handoff only ever names its own site's evidence; never label another site's.
+            statement = statement.where(KbChunk.site_id == site_id)
+        result = await self._session.execute(statement)
         out: dict[UUID, dict] = {}
         for chunk in result.scalars().all():
             out[chunk.id] = {

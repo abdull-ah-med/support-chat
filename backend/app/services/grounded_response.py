@@ -1,9 +1,9 @@
 """Typed, evidence-first decisions for visitor-facing bot replies.
 
-Claude authors normal answers. Deterministic code owns hard control cases,
-narrow validation invariants, and safe failure copy — never extractive FAQ prose.
+Claude authors every answer; deterministic code owns structural validation and the places where
+the bot must stay silent. When the documents do not answer, nothing is drafted or guessed: the
+turn takes the "unknown" path, which says so honestly in the visitor's language.
 """
-# ruff: noqa: RUF001
 
 from __future__ import annotations
 
@@ -14,18 +14,25 @@ from dataclasses import replace
 import structlog
 
 from app.chat.outcome_copy import (
+    INSUFFICIENT_HUMAN,
+    INSUFFICIENT_SOLO,
     TECH_FAIL_HUMAN,
-    abuse_boundary_line,
-    clarify_scope_line,
-    injection_boundary_line,
-    transfer_offer_line,
+    TECH_FAIL_SOLO,
+    contact_block,
 )
-from app.llm.intent import ABUSE_TOKENS, is_disengage_request
-from app.llm.safety_markers import contains_injection_marker
+from app.llm.prompts import NO_ANSWER
+from app.services import output_validator
 from app.services.bot_trace import record_trace
 from app.services.grounded_response_types import (
-    Citation,
-    EvidenceUnit,
+    Citation as Citation,
+)
+from app.services.grounded_response_types import (
+    EvidenceUnit as EvidenceUnit,
+)
+from app.services.grounded_response_types import (
+    ModelDraft as ModelDraft,
+)
+from app.services.grounded_response_types import (
     Provider,
     ProviderStatus,
     RepairProvider,
@@ -33,134 +40,70 @@ from app.services.grounded_response_types import (
     ResponseOutcome,
     TurnContext,
 )
-from app.services.grounded_response_types import (
-    ModelDraft as ModelDraft,
-)
 from app.services.grounded_response_validation import (
-    _LIMITATION_RE,
-    _is_clarifying_only,
-    _normalize_copy,
     attribute_contact_literals,
-    focus_unknown_contact,
-    sentence_spans,
+    numbers_are_supported,
     validate_draft,
 )
-from app.services.grounded_response_validation import (
-    uncited_factual_sentences as uncited_factual_sentences,
-)
-from app.services.kb_tokens import tokenize
 
 log = structlog.get_logger("grounded_response")
 
-
-_FRUSTRATION_RE = re.compile(r"\b(dumb|useless|stupid|idiot|not helpful|waste of time)\b", re.I)
-_SOURCE_FOLLOWUP_RE = re.compile(
-    r"which page|what page|which source|"
-    r"where did (?:that|this) come from|"
-    r"where did you get (?:that|this|those)|"
-    r"quote (?:the source|the exact sentence|that sentence|the sentence)|cite (?:your|the) source|"
-    r"cite the url|"
-    r"list (?:every|all) pages?|which url|what url",
-    re.I,
-)
-_SUBSTANTIVE_REQUEST_RE = re.compile(
-    r"[?¿]|\b(?:what|how|why|when|where|which|explain|describe|compare|"
-    r"tell me|help me|can i|can you|could you|do you|does|is there)\b",
-    re.I,
-)
-_UNRELATED_TASK_RE = re.compile(
-    r"\b(?:malware|ransomware|steal (?:passwords|credentials)|weather forecast|"
-    r"write (?:a poem|a song)|recipe for|cook (?:pasta|a meal))\b",
-    re.I,
+# Reply kinds that end with an offer of a person (when one can join): a "yes" next accepts it.
+OFFERED_PERSON_REASONS = frozenset(
+    {"no_evidence", "repeated_miss", "grounding_reject", "tech_fail", "urgent_safety"}
 )
 
+# Model-written text that carries no company facts may not carry links either.
+_LINK_RE = re.compile(r"(?i)\b(?:https?://|www\.)\S+")
 
-def _eligible(units: list[EvidenceUnit]) -> list[EvidenceUnit]:
+
+def is_no_answer(body: str) -> bool:
+    return NO_ANSWER in (body or "")
+
+
+def eligible_units(units: list[EvidenceUnit]) -> list[EvidenceUnit]:
     return [
         unit for unit in units if unit.enabled and unit.live and unit.answer_mode != "human_only"
     ]
 
 
-def _safe_sensitive_handoff() -> ResponseDecision:
-    return ResponseDecision(
-        ResponseOutcome.BOUNDARY,
-        "policy_sensitive",
-        "For privacy and compliance, a specialist needs to help with that question.",
-        offer_handoff=True,
-    )
+def checked_reply(
+    text: str | None,
+    *,
+    visitor_words: list[str] | tuple[str, ...] = (),
+    off_brand_blocklist: list[str] | tuple[str, ...] = (),
+    site_labels: list[str] | tuple[str, ...] = (),
+) -> str | None:
+    """Return model-written conversational text only if it is safe to show, else None.
 
-
-def _direct_handoff() -> ResponseDecision:
-    return ResponseDecision(
-        ResponseOutcome.BOUNDARY,
-        "visitor_request",
-        "",
-        offer_handoff=True,
-    )
-
-
-def _has_prior_assistant(prior_messages: tuple[dict[str, str], ...]) -> bool:
-    return any(
-        (message.get("role") == "assistant" and (message.get("content") or "").strip())
-        for message in prior_messages
-    )
-
-
-def _is_source_followup(text: str) -> bool:
-    return bool(_SOURCE_FOLLOWUP_RE.search(" ".join((text or "").split())))
-
-
-def history_recap_decision(
-    visitor_text: str, prior_messages: tuple[dict[str, str], ...]
-) -> ResponseDecision | None:
-    request = " ".join((visitor_text or "").casefold().split())
-    if not re.search(
-        r"(?:remind me|what did i (?:say|tell you)|what .*i originally (?:said|described))",
-        request,
-    ):
+    Such text may state no company facts, so it may contain no link, contact detail, personal
+    identifier or number the visitor did not write themselves. The site's own name and scope
+    (``site_labels``) are configuration, not invented facts, so digits in them are allowed.
+    Language-neutral by construction.
+    """
+    body = (text or "").strip()
+    if not body or is_no_answer(body) or _LINK_RE.search(body):
         return None
-    first = next(
-        (
-            " ".join((message.get("content") or "").split())
-            for message in prior_messages
-            if message.get("role") == "user" and (message.get("content") or "").strip()
-        ),
-        "",
-    )
-    if not first:
+    if not numbers_are_supported(body, *visitor_words, *site_labels):
         return None
-    return ResponseDecision(
-        ResponseOutcome.SYNTHESIZED_ANSWER,
-        "conversation_recap",
-        f'You said: "{first[:800]}"',
+    outcome = output_validator.evaluate(
+        body,
+        allowed_ids=[],
+        cited=[],
+        uncited_ok=True,
+        off_brand_blocklist=list(off_brand_blocklist),
     )
+    return body if outcome.accepted else None
 
 
-def _same_kind_miss_count(turn: TurnContext, reason: str) -> int:
-    if turn.prior_miss_count <= 0:
-        return 0
-    prior = turn.prior_miss_reason
-    if prior is None:
-        return 0
-    knowledge_misses = {"grounding_reject", "needs_confirmation"}
-    if prior == reason or (prior in knowledge_misses and reason in knowledge_misses):
-        return turn.prior_miss_count
-    return 0
-
-
-def _is_canned_clarify(body: str, site_name: str) -> bool:
-    return _normalize_copy(body) == _normalize_copy(clarify_scope_line(site_name))
-
-
-def source_followup_decision(citations: list[Citation]) -> ResponseDecision:
-    if not citations:
-        return ResponseDecision(
-            ResponseOutcome.CLARIFICATION,
-            "source_followup",
-            "Which detail would you like me to confirm?",
-        )
+def source_followup_decision(
+    citations: list[Citation], lead_in: str | None = None
+) -> ResponseDecision:
+    """Re-show the source of the previous answer: its URL and one complete evidence passage."""
     first = citations[0]
-    prefix = f"Source: {first.source_url}\n\n"
+    prefix = (f"{lead_in.strip()}\n\n" if lead_in and lead_in.strip() else "") + (
+        f"{first.source_url}\n\n"
+    )
     # Preserve one complete evidence passage, never clip its qualifiers.
     body = prefix + first.cited_text
     verified = [replace(first, response_start=len(prefix), response_end=len(body))]
@@ -172,59 +115,67 @@ def source_followup_decision(citations: list[Citation]) -> ResponseDecision:
     )
 
 
-def _safe_no_evidence(prior_miss_count: int, site_name: str = "") -> ResponseDecision:
-    if prior_miss_count <= 0:
-        # Without any qualifying passage we cannot establish business scope.
-        # Do not assert a product knowledge gap for an unrelated question.
-        return ResponseDecision(
-            ResponseOutcome.CLARIFICATION,
-            "no_evidence",
-            clarify_scope_line(site_name),
+def unknown_decision(
+    turn: TurnContext,
+    *,
+    reason: str | None = None,
+    request_id: str | None = None,
+    text: str | None = None,
+) -> ResponseDecision:
+    """The honest "no verified information" reply, with a route to a person or the contact route.
+
+    ``text`` is the model-written unknown reply (visitor language, no facts), added by the turn
+    service after the decision is known. Until then (and if that text is unusable) the neutral
+    fixed line stands in. The configured contact route is appended verbatim when no person can
+    join the chat.
+    """
+    checked = (
+        checked_reply(
+            text,
+            visitor_words=_visitor_words(turn),
+            off_brand_blocklist=turn.off_brand_blocklist,
+            site_labels=(turn.site_name, turn.assistant_scope),
         )
+        if text
+        else None
+    )
+    body = checked or (INSUFFICIENT_HUMAN if turn.human_enabled else INSUFFICIENT_SOLO)
+    if not turn.human_enabled:
+        contacts = contact_block(turn.contact_info)
+        if contacts:
+            body = f"{body}\n\n{contacts}"
+    repeated = turn.prior_miss_count > 0
     return ResponseDecision(
         ResponseOutcome.KNOWLEDGE_GAP,
-        "repeated_miss",
-        transfer_offer_line(human_enabled=True),
-        offer_handoff=True,
+        reason or ("repeated_miss" if repeated else "no_evidence"),
+        body,
+        offer_handoff=turn.human_enabled and not turn.handoff_pending,
+        provider_status=ProviderStatus.OK,
+        request_id=request_id,
     )
 
 
+def _visitor_words(turn: TurnContext) -> list[str]:
+    return [
+        turn.visitor_text,
+        *(
+            message.get("content") or ""
+            for message in turn.prior_messages
+            if message.get("role") == "user"
+        ),
+    ]
+
+
 def _safe_technical_failure(
-    reason: str = "tech_fail", *, request_id: str | None = None
+    reason: str = "tech_fail", *, request_id: str | None = None, human_enabled: bool = True
 ) -> ResponseDecision:
     log.info("grounded_tech_fail", reason=reason)
     return ResponseDecision(
         ResponseOutcome.KNOWLEDGE_GAP,
         "tech_fail",
-        TECH_FAIL_HUMAN,
-        offer_handoff=True,
+        TECH_FAIL_HUMAN if human_enabled else TECH_FAIL_SOLO,
+        offer_handoff=human_enabled,
         provider_status=ProviderStatus.TECH_FAIL,
-        request_id=request_id,
-    )
-
-
-def _safe_grounding_reject(
-    *, prior_miss_count: int = 0, request_id: str | None = None
-) -> ResponseDecision:
-    """Visitor-safe copy when the provider succeeded but draft validation failed.
-
-    Specific reject reason is already on the grounded_draft_reject log line.
-    """
-    if prior_miss_count <= 0:
-        return ResponseDecision(
-            ResponseOutcome.KNOWLEDGE_GAP,
-            "grounding_reject",
-            "I couldn't verify an accurate answer to that question. A specialist can help.",
-            offer_handoff=False,
-            provider_status=ProviderStatus.OK,
-            request_id=request_id,
-        )
-    return ResponseDecision(
-        ResponseOutcome.KNOWLEDGE_GAP,
-        "repeated_miss",
-        transfer_offer_line(human_enabled=True),
-        offer_handoff=True,
-        provider_status=ProviderStatus.OK,
         request_id=request_id,
     )
 
@@ -234,206 +185,87 @@ def _elapsed_ms(started_ns: int) -> int:
 
 
 class GroundedResponseEngine:
+    """Draft from evidence, validate structurally, repair at most once, else say "unknown"."""
+
     def __init__(
         self, complete: Provider | None = None, repair: RepairProvider | None = None
     ) -> None:
         self._complete = complete
         self._repair = repair
 
-    def boundary_decision(self, turn: TurnContext) -> ResponseDecision | None:
-        """Hard-control cases decided before any answer, canned or generated, is considered."""
-        question = (turn.visitor_text or "").strip()
-        if turn.sensitive:
-            return _safe_sensitive_handoff()
-        if turn.explicit_human_request:
-            return _direct_handoff()
-        if contains_injection_marker(question) or is_disengage_request(question):
-            return self._boundary("prompt_injection", turn.site_name)
-        # Profanity is tone, not an instruction override. Keep the cheap boundary
-        # for insult-only turns; let the provider answer an actual request.
-        if not _SUBSTANTIVE_REQUEST_RE.search(question):
-            if set(tokenize(question)) & ABUSE_TOKENS:
-                return self._boundary("abuse", turn.site_name)
-            if _FRUSTRATION_RE.search(question):
-                return self._boundary("frustration", turn.site_name)
-        if _UNRELATED_TASK_RE.search(question):
-            return ResponseDecision(
-                ResponseOutcome.BOUNDARY, "off_topic", clarify_scope_line(turn.site_name)
-            )
-        return None
-
     async def respond(  # noqa: C901
         self,
         turn: TurnContext,
         stage_timings: dict[str, int] | None = None,
+        *,
+        allow_repair: bool = True,
     ) -> ResponseDecision:
         timings = stage_timings if stage_timings is not None else {}
-        boundary = self.boundary_decision(turn)
-        if boundary is not None:
-            return boundary
-        evidence = _eligible(turn.evidence)
-        if not evidence and turn.resolved_request is None:
-            return _safe_no_evidence(_same_kind_miss_count(turn, "no_evidence"), turn.site_name)
-
+        evidence = eligible_units(turn.evidence)
+        if not evidence:
+            return unknown_decision(turn)
         if self._complete is None:
-            return _safe_technical_failure(reason="provider_unavailable")
+            return _safe_technical_failure(
+                reason="provider_unavailable", human_enabled=turn.human_enabled
+            )
         try:
             draft = await self._complete(turn, evidence)
         except Exception:
-            return _safe_technical_failure(reason="provider_exception")
+            return _safe_technical_failure(
+                reason="provider_exception", human_enabled=turn.human_enabled
+            )
         if draft is None or not draft.body.strip():
-            return _safe_technical_failure(reason="empty_draft")
-        if turn.resolved_request is not None:
-            original_count = len(draft.citations)
-            focused = focus_unknown_contact(draft, evidence)
-            record_trace("unknown_contact", condensed=focused.body != draft.body)
-            draft = focused
-            draft = attribute_contact_literals(draft, evidence)
-            record_trace("contact_attribution", attached=len(draft.citations) - original_count)
+            return _safe_technical_failure(reason="empty_draft", human_enabled=turn.human_enabled)
+        if is_no_answer(draft.body):
+            record_trace("draft", no_answer=True, body=draft.body[:600])
+            return unknown_decision(turn, request_id=draft.request_id)
 
+        draft = attribute_contact_literals(draft, evidence)
         started = time.perf_counter_ns()
         record_trace("draft", draft=draft)
         validation = validate_draft(draft, evidence, turn)
+        timings["validate"] = _elapsed_ms(started)
         record_trace(
             "validation",
             accepted=validation.accepted,
             reason=validation.reason,
             validated_draft=validation.draft,
         )
-        timings["validate"] = _elapsed_ms(started)
-        if (
-            validation.reason in {"uncited_response_text", "unsupported_commitment"}
-            and self._repair is not None
-        ):
-            record_trace(
-                "citation_repair",
-                attempted=True,
-                original_draft=draft,
-                uncited_sentences=uncited_factual_sentences(draft),
-            )
+        repair_used = False
+        if not validation.accepted and allow_repair and self._repair is not None:
+            repair_used = True
             started = time.perf_counter_ns()
             try:
-                repaired = await self._repair(turn, evidence, draft)
+                repaired = await self._repair(turn, evidence, draft, validation.reason)
             except Exception:
                 repaired = None
-            timings["citation_repair"] = _elapsed_ms(started)
-            if repaired is not None and repaired.body.strip():
-                draft = (
-                    attribute_contact_literals(repaired, evidence)
-                    if turn.resolved_request is not None
-                    else repaired
+            timings["repair"] = _elapsed_ms(started)
+            if repaired is not None and is_no_answer(repaired.body):
+                return unknown_decision(
+                    turn, reason="grounding_reject", request_id=repaired.request_id
                 )
+            if repaired is not None and repaired.body.strip():
+                draft = attribute_contact_literals(repaired, evidence)
                 started = time.perf_counter_ns()
                 validation = validate_draft(draft, evidence, turn)
                 timings["validate"] += _elapsed_ms(started)
             record_trace(
-                "citation_repair",
+                "repair",
+                failure=validation.reason,
                 accepted=validation.accepted,
-                reason=validation.reason,
                 repaired_draft=repaired,
             )
-            record_trace(
-                "validation",
-                accepted=validation.accepted,
-                reason=validation.reason,
-                validated_draft=validation.draft,
-            )
         if not validation.accepted or validation.draft is None:
-            return _safe_grounding_reject(
-                prior_miss_count=_same_kind_miss_count(turn, "grounding_reject"),
-                request_id=draft.request_id,
+            decision = unknown_decision(
+                turn, reason="grounding_reject", request_id=draft.request_id
             )
-        if _is_canned_clarify(validation.draft.body, turn.site_name):
-            return ResponseDecision(
-                ResponseOutcome.BOUNDARY,
-                "off_topic",
-                validation.draft.body,
-                provider_status=ProviderStatus.OK,
-                request_id=draft.request_id,
-            )
-
-        if turn.resolved_request is not None:
-            # The separate assessor owns semantic completeness for resolved
-            # requests. Do not append an English transfer template before it can
-            # distinguish a useful next step from a repeated content miss.
-            return ResponseDecision(
-                ResponseOutcome.CLARIFICATION
-                if _is_clarifying_only(validation.draft.body)
-                else ResponseOutcome.SYNTHESIZED_ANSWER,
-                None,
-                validation.draft.body,
-                citations=validation.draft.citations,
-                provider_status=ProviderStatus.OK,
-                request_id=draft.request_id,
-            )
-
-        unresolved = any(
-            _LIMITATION_RE.search(sentence.group().strip())
-            and not (
-                validation.draft.citations
-                and re.match(
-                    r"^(?:a|our) specialist can (?:help|review|discuss)\b",
-                    sentence.group().strip(),
-                    re.I,
-                )
-            )
-            for sentence in sentence_spans(validation.draft.body)
-        )
-        record_trace(
-            "answer_quality",
-            grounding_accepted=True,
-            explicit_unresolved_detail=unresolved,
-            resolution="unresolved" if unresolved else "no_explicit_gap",
-        )
-        if unresolved:
-            body = validation.draft.body
-            asked_transfer = bool(re.search(r"would you like (?:me to )?connect you\b", body, re.I))
-            repeated = _same_kind_miss_count(turn, "needs_confirmation") > 0
-            offer = asked_transfer or repeated
-            if repeated and not asked_transfer:
-                body += "\n\n" + transfer_offer_line(human_enabled=True)
-            return ResponseDecision(
-                ResponseOutcome.PARTIAL_ANSWER
-                if validation.draft.citations
-                else ResponseOutcome.KNOWLEDGE_GAP,
-                "needs_confirmation",
-                body,
-                citations=validation.draft.citations,
-                offer_handoff=offer,
-                provider_status=ProviderStatus.OK,
-                request_id=draft.request_id,
-            )
-
-        outcome = (
-            ResponseOutcome.CLARIFICATION
-            if _is_clarifying_only(validation.draft.body)
-            else ResponseOutcome.SYNTHESIZED_ANSWER
-        )
+            return replace(decision, repair_used=repair_used)
         return ResponseDecision(
-            outcome,
+            ResponseOutcome.SYNTHESIZED_ANSWER,
             None,
             validation.draft.body,
             citations=validation.draft.citations,
             provider_status=ProviderStatus.OK,
             request_id=validation.draft.request_id,
-        )
-
-    @staticmethod
-    def _boundary(reason: str, site_name: str = "") -> ResponseDecision:
-        if reason == "frustration":
-            body = (
-                "I’m sorry—that wasn’t helpful. Tell me what you need confirmed, "
-                "or I can connect you with a specialist."
-            )
-        elif reason == "abuse":
-            body = abuse_boundary_line(site_name)
-        elif reason == "prompt_injection":
-            body = injection_boundary_line(site_name)
-        else:
-            body = clarify_scope_line(site_name)
-        return ResponseDecision(
-            ResponseOutcome.BOUNDARY,
-            reason,
-            body,
-            offer_handoff=reason == "frustration",
+            repair_used=repair_used,
         )

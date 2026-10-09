@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 if TYPE_CHECKING:
-    from app.llm.answer_relevance import ResolvedRequest
+    from app.llm.understanding import TurnUnderstanding
 
 
 class ResponseOutcome(StrEnum):
@@ -40,6 +40,8 @@ class EvidenceUnit:
     enabled: bool = True
     live: bool = True
     source_heading: str = ""
+    # Dense similarity to the search query (0-1) when the retriever scored it, else None.
+    relevance: float | None = None
 
 
 @dataclass(frozen=True)
@@ -60,13 +62,18 @@ class TurnContext:
     visitor_text: str
     evidence: list[EvidenceUnit]
     site_name: str = ""
+    assistant_scope: str = ""
+    primary_language: str = "en"
     prior_messages: tuple[dict[str, str], ...] = ()
+    # Misses already recorded on this conversation (fallback_count at the start of the turn).
     prior_miss_count: int = 0
-    prior_miss_reason: str | None = None
-    explicit_human_request: bool = False
-    sensitive: bool = False
     off_brand_blocklist: tuple[str, ...] = ()
-    resolved_request: ResolvedRequest | None = None
+    understanding: TurnUnderstanding | None = None
+    human_enabled: bool = True
+    # A person was already asked to join this chat and has not yet.
+    handoff_pending: bool = False
+    # Configured contact route (site.contact_info); shown verbatim, never composed by a model.
+    contact_info: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -81,6 +88,10 @@ class ResponseDecision:
     display_locator: str | None = None
     # When set, a specialist is asked to take the chat right after this reply is stored.
     handoff_reason: str | None = None
+    # The one repair attempt a turn is allowed has been spent on this answer.
+    repair_used: bool = False
+    # The visitor withdrew a pending request for a person: stand the handoff down.
+    cancel_handoff: bool = False
 
 
 @dataclass(frozen=True)
@@ -99,5 +110,5 @@ class DraftValidation:
 
 Provider = Callable[[TurnContext, list[EvidenceUnit]], Awaitable[ModelDraft | None]]
 RepairProvider = Callable[
-    [TurnContext, list[EvidenceUnit], ModelDraft], Awaitable[ModelDraft | None]
+    [TurnContext, list[EvidenceUnit], ModelDraft, str], Awaitable[ModelDraft | None]
 ]
