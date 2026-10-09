@@ -31,14 +31,30 @@ from tests.ws_helpers import (
     sync_session,
 )
 
+pytestmark = pytest.mark.xdist_group("notification_e2e")
 
-@pytest.fixture
-def stack(migrated_db, tmp_path):
-    instance = NotificationStack(tmp_path)
+
+@pytest.fixture(scope="module")
+def running_stack(tmp_path_factory):
+    """One API process, TLS gateway and cert for the whole module; tests reset state instead."""
+    from alembic.config import Config
+
+    from alembic import command
+
+    command.upgrade(Config("alembic.ini"), "head")
+    instance = NotificationStack(tmp_path_factory.mktemp("notification-e2e"))
     try:
         yield instance
     finally:
         instance.close()
+
+
+@pytest.fixture
+def stack(migrated_db, running_stack):
+    try:
+        yield running_stack
+    finally:
+        running_stack.reset()  # stop workers before migrated_db truncates the tables
 
 
 def staff(stack):
@@ -413,105 +429,99 @@ def test_two_workers_deliver_burst_once_per_device_with_correct_feed_pagination(
     assert stack.feed(alex)["unread_count"] == 0
 
 
-@pytest.mark.parametrize(
-    "block", ["read", "muted", "types", "inactive", "revoked", "unsubscribed", "stale"]
-)
-def test_pending_push_is_suppressed_when_it_no_longer_applies(stack, block):
-    """Catches late alerts after a read, preference change, account revocation or expiry."""
-    alex, _ = staff(stack)
+def test_pending_push_is_suppressed_when_it_no_longer_applies(stack):
+    """Catches late alerts after a read, preference change, account revocation or expiry.
+
+    One visitor chat queues one pending push per staff device; every staff member then has a
+    different reason for it to no longer apply, and a single worker must deliver none of them.
+    """
     site = callback_site()
-    _, endpoint = stack.subscribe(alex, "blocked")
+    blocks = ["read", "muted", "types", "inactive", "revoked", "unsubscribed", "stale"]
+    people = {}
+    for block in blocks:
+        email = f"{block}@example.local"
+        insert_staff(email, block.title(), "secret")
+        headers = stack.login(email)
+        people[block] = (email, headers, stack.subscribe(headers, block)[1])
     with stack.visitor("careers", "careers-key") as visitor:
         prechat(visitor)
-    feed = stack.feed(alex)
-    assert feed["unread_count"] == 1
-    assert sql("SELECT count(*) FROM push_deliveries WHERE finished_at IS NULL") == [(1,)]
-    if block == "read":
-        assert (
-            stack.http.post(
-                f"/api/notifications/{feed['items'][0]['id']}/read", headers=alex
-            ).status_code
-            == 204
-        )
-    elif block == "muted":
-        assert (
-            stack.http.put(
-                "/api/notifications/preferences/push",
-                headers=alex,
-                json={"site_id": str(site), "enabled": False, "scenarios": ["needs_attention"]},
-            ).status_code
-            == 200
-        )
-    elif block == "types":
-        assert (
-            stack.http.put(
-                "/api/notifications/preferences/push",
-                headers=alex,
-                json={"site_id": str(site), "enabled": True, "scenarios": ["bot"]},
-            ).status_code
-            == 200
-        )
-    elif block == "inactive":
-        sql("UPDATE users SET is_active = false WHERE email = %s", (ALEX_EMAIL,))
-    elif block == "revoked":
-        sql("UPDATE users SET token_version = token_version + 1 WHERE email = %s", (ALEX_EMAIL,))
-    elif block == "unsubscribed":
-        assert (
-            stack.http.request(
-                "DELETE",
-                "/api/notifications/push/subscriptions",
-                headers=alex,
-                json={"endpoint": endpoint},
-            ).status_code
-            == 204
-        )
-    else:
-        sql("UPDATE push_deliveries SET created_at = now() - interval '16 minutes'")
+    for _, headers, _ in people.values():
+        assert stack.feed(headers)["unread_count"] == 1
+    assert sql("SELECT count(*) FROM push_deliveries WHERE finished_at IS NULL") == [(7,)]
+
+    def push_preferences(headers, enabled, scenarios):
+        return stack.http.put(
+            "/api/notifications/preferences/push",
+            headers=headers,
+            json={"site_id": str(site), "enabled": enabled, "scenarios": scenarios},
+        ).status_code
+
+    headers = people["read"][1]
+    notification = stack.feed(headers)["items"][0]["id"]
+    assert (
+        stack.http.post(f"/api/notifications/{notification}/read", headers=headers).status_code
+        == 204
+    )
+    assert push_preferences(people["muted"][1], False, ["needs_attention"]) == 200
+    assert push_preferences(people["types"][1], True, ["bot"]) == 200
+    sql("UPDATE users SET is_active = false WHERE email = %s", (people["inactive"][0],))
+    sql(
+        "UPDATE users SET token_version = token_version + 1 WHERE email = %s",
+        (people["revoked"][0],),
+    )
+    unsubscribed = stack.http.request(
+        "DELETE",
+        "/api/notifications/push/subscriptions",
+        headers=people["unsubscribed"][1],
+        json={"endpoint": people["unsubscribed"][2]},
+    )
+    assert unsubscribed.status_code == 204
+    sql(
+        "UPDATE push_deliveries SET created_at = now() - interval '16 minutes' "
+        "WHERE subscription_id IN (SELECT id FROM push_subscriptions WHERE endpoint = %s)",
+        (people["stale"][2],),
+    )
     stack.start_worker()
     eventually(drained)
     assert stack.gateway.received(accepted=False) == []
     assert sql("SELECT sum(attempts) FROM push_deliveries")[0][0] in (None, 0)
 
 
-@pytest.mark.parametrize("status", [429, 503])
-def test_persistent_push_failure_stops_retrying_without_blocking_other_devices(stack, status):
+def test_persistent_push_failure_stops_retrying_without_blocking_other_devices(stack):
     """Catches infinite retries and starvation of another valid subscribed device."""
     alex, _ = staff(stack)
-    _, failed = stack.subscribe(alex, "failing")
+    failing = {429: "failing-429", 503: "failing-503"}
+    endpoints = {status: stack.subscribe(alex, name)[1] for status, name in failing.items()}
     _, healthy = stack.subscribe(alex, "healthy")
-    stack.gateway.respond("failing", *([status] * 6))
-    assert (
-        stack.http.post(
-            "/api/notifications/push/test", headers=alex, json={"endpoint": failed}
-        ).status_code
-        == 202
-    )
-    assert (
-        stack.http.post(
-            "/api/notifications/push/test", headers=alex, json={"endpoint": healthy}
-        ).status_code
-        == 202
-    )
+    for status, name in failing.items():
+        stack.gateway.respond(name, *([status] * 6))
+    for endpoint in (*endpoints.values(), healthy):
+        response = stack.http.post(
+            "/api/notifications/push/test", headers=alex, json={"endpoint": endpoint}
+        )
+        assert response.status_code == 202
     stack.start_worker()
     for attempt in range(1, 6):
 
         def completed_attempt(expected_attempt=attempt):
-            row = sql(
-                "SELECT attempts, finished_at IS NOT NULL FROM push_deliveries JOIN push_subscriptions ON push_subscriptions.id = subscription_id WHERE endpoint = %s",
-                (failed,),
-            )[0]
-            assert row == (expected_attempt, expected_attempt == 5)
+            for endpoint in endpoints.values():
+                row = sql(
+                    "SELECT attempts, finished_at IS NOT NULL FROM push_deliveries JOIN push_subscriptions ON push_subscriptions.id = subscription_id WHERE endpoint = %s",
+                    (endpoint,),
+                )[0]
+                assert row == (expected_attempt, expected_attempt == 5)
 
         eventually(completed_attempt)
         if attempt < 5:
             sql(
-                "UPDATE push_deliveries SET next_attempt_at = now() WHERE subscription_id IN (SELECT id FROM push_subscriptions WHERE endpoint = %s)",
-                (failed,),
+                "UPDATE push_deliveries SET next_attempt_at = now() WHERE subscription_id IN (SELECT id FROM push_subscriptions WHERE endpoint = ANY(%s))",
+                (list(endpoints.values()),),
             )
     eventually(drained)
     delivered = stack.gateway.received(accepted=False)
     assert Counter((row["path"], row["status"]) for row in delivered) == {
-        ("/fcm/send/failing", status): 5,
+        ("/fcm/send/failing-429", 429): 5,
+        ("/fcm/send/failing-503", 503): 5,
         ("/fcm/send/healthy", 201): 1,
     }
-    assert sql("SELECT count(*) FROM push_subscriptions") == [(2,)]
+    assert sql("SELECT count(*) FROM push_subscriptions") == [(3,)]

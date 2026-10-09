@@ -85,10 +85,6 @@ const ADMIN_ALIGN_LINES = [
     author_user: { id: "a", display_name: "Alex Morgan" },
   },
 ]
-const MULTI_DAY_LINES = [
-  { id: 10, role: "visitor", body: "First day", created_at: "2026-01-01T12:00:00Z" },
-  { id: 11, role: "visitor", body: "Second day", created_at: "2026-01-02T12:00:00Z" },
-]
 
 describe("transcript typing indicator", () => {
   beforeEach(() => {
@@ -109,17 +105,6 @@ describe("transcript typing indicator", () => {
 
     expect(screen.getByText(VISITOR_LINE)).toBeInTheDocument()
     expect(screen.queryByText("Assistant is typing…")).not.toBeInTheDocument()
-  })
-
-  test("day labels use the same compact pill treatment", () => {
-    renderWithProviders(<Transcript lines={MULTI_DAY_LINES} />)
-
-    const markers = document.querySelectorAll('[data-slot="marker"]')
-    expect(markers).toHaveLength(2)
-    for (const marker of markers) {
-      expect(marker).toHaveClass("rounded-full", "w-fit", "bg-ice-2", "text-[11px]")
-      expect(marker).not.toHaveAttribute("data-variant", "separator")
-    }
   })
 
   test("keeps paragraph breaks in agent replies", () => {

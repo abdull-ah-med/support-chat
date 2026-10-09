@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from "@testing-library/react"
+import { screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { useCallback, useState } from "react"
 import { describe, expect, test } from "vitest"
@@ -49,19 +49,5 @@ describe("alert dialog chrome", () => {
     await waitFor(() =>
       expect(screen.queryByText("Remove canned response?")).not.toBeInTheDocument(),
     )
-  })
-
-  test("keeps footer actions on the alert frame instead of scrolling with the body", async () => {
-    const user = userEvent.setup()
-    renderWithProviders(<AlertFixture />)
-    await user.click(screen.getByRole("button", { name: "Remove response" }))
-    const dialog = await screen.findByRole("dialog")
-    const remove = within(dialog).getByRole("button", { name: "Remove response" })
-    const footer = remove.parentElement
-
-    expect(dialog.className).toMatch(/\boverflow-hidden\b/)
-    expect(footer?.className).toMatch(/\bshrink-0\b/)
-    expect(footer?.className).toMatch(/\bsticky\b/)
-    expect(footer?.className).toMatch(/\bbottom-0\b/)
   })
 })

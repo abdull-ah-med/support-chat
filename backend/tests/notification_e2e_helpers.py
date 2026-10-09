@@ -46,7 +46,10 @@ def eventually(check, *, timeout=15):
 
 
 def sql(query, parameters=()):
-    url = TEST_DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
+    # Read at call time: parallel workers export their own DATABASE_URL.
+    url = os.environ.get("DATABASE_URL", TEST_DATABASE_URL).replace(
+        "postgresql+asyncpg://", "postgresql://"
+    )
     assert "test" in url.rsplit("/", 1)[-1]
     with psycopg.connect(url) as connection:
         cursor = connection.execute(query, parameters)
@@ -100,6 +103,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             assert time.time() < decoded["claims"]["exp"] <= time.time() + 86400
             assert self.headers["Content-Encoding"] == "aes128gcm"
             assert self.headers["TTL"] == "900"
+            assert self.headers["Urgency"] == "high"
             assert self.headers["Authorization"].split(", k=")[1] == self.server.application_key
             assert b"SampleSite" not in body and b"secret visitor message" not in body
             with self.server.guard:
@@ -155,10 +159,29 @@ class PushGateway:
         self.thread.join(timeout=5)
 
 
-def free_port():
-    with socket.socket() as listener:
-        listener.bind(("127.0.0.1", 0))
-        return listener.getsockname()[1]
+# The API runs the real app. Its only change is that the visitor socket's 15s idle-tick
+# sleep is shortened, so the handoff-wait prompts are produced by the real loop quickly.
+API_LAUNCHER = """
+import asyncio, os, socket
+import uvicorn
+import app.chat.ws_visitor as ws_visitor
+
+tick = float(os.environ["E2E_IDLE_TICK_SECONDS"])
+
+
+class Clock:
+    def __getattr__(self, name):
+        return getattr(asyncio, name)
+
+    @staticmethod
+    async def sleep(delay, *args):
+        return await asyncio.sleep(tick if delay == 15 else delay, *args)
+
+
+ws_visitor.asyncio = Clock()
+listener = socket.socket(fileno=int(os.environ["E2E_API_FD"]))
+uvicorn.Server(uvicorn.Config("app.main:app", access_log=False)).run(sockets=[listener])
+"""
 
 
 class NotificationStack:
@@ -177,37 +200,43 @@ class NotificationStack:
             "PYTHONPATH": str(BACKEND),
             "RATE_VISITOR_SUBMIT": "200",
             "RATE_VISITOR_SUBMIT_IP": "500",
+            "E2E_IDLE_TICK_SECONDS": "1",
+            "ANTHROPIC_API_KEY": "",
+            "OPENAI_API_KEY": "",
         }
-        port = free_port()
-        self.base_url = f"http://127.0.0.1:{port}"
-        self.api = self.launch(
-            [
-                sys.executable,
-                "-m",
-                "uvicorn",
-                "app.main:app",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                str(port),
-                "--no-access-log",
-            ],
-            directory / "api.log",
-        )
+        # Bind port 0 here and hand the open socket to the API: no free-port race.
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(128)
+        self.base_url = f"http://127.0.0.1:{listener.getsockname()[1]}"
+        self.environment["E2E_API_FD"] = str(listener.fileno())
+        try:
+            self.api = self.launch(
+                [sys.executable, "-c", API_LAUNCHER],
+                directory / "api.log",
+                pass_fds=(listener.fileno(),),
+            )
+        finally:
+            listener.close()
         self.http = httpx.Client(
             base_url=self.base_url, headers={"Host": "localhost:3000"}, timeout=10, trust_env=False
         )
         try:
-            eventually(self.ready)
+            eventually(self.ready, timeout=60)
         except BaseException:
             self.close()
             raise
 
-    def launch(self, command, log_path):
+    def launch(self, command, log_path, pass_fds=()):
         output = log_path.open("w")
         self.logs.append(output)
         return subprocess.Popen(
-            command, cwd=BACKEND, env=self.environment, stdout=output, stderr=subprocess.STDOUT
+            command,
+            cwd=BACKEND,
+            env=self.environment,
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            pass_fds=pass_fds,
         )
 
     def ready(self):
@@ -295,6 +324,17 @@ class NotificationStack:
             )
             receive(socket, "state")
             yield socket
+
+    def reset(self):
+        """Return to a clean slate between tests while keeping the API and gateway running."""
+        for worker in self.workers:
+            self.stop_process(worker)
+        self.workers.clear()
+        with self.gateway.server.guard:
+            self.gateway.server.records.clear()
+            self.gateway.server.errors.clear()
+            self.gateway.server.statuses.clear()
+        self.http.cookies.clear()
 
     def close(self):
         for worker in self.workers:

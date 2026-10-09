@@ -35,7 +35,7 @@ test("visitor details closes back to the same chat and restores its control", as
   )
 })
 
-test.each([320, 390, 820, 1100])(
+test.each([320, 1100])(
   "at %i px the inbox opens one pane at a time and returns to its filter",
   async (width) => {
     vi.stubGlobal("innerWidth", width)

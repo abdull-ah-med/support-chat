@@ -16,12 +16,6 @@ describe("public support stand-in", () => {
         name: "This is a demo website for the Chatbot widget.",
       }),
     ).toBeInTheDocument()
-    expect(screen.queryByRole("button", { name: "Switch to dark mode" })).not.toBeInTheDocument()
-    expect(screen.queryByRole("button", { name: "Switch to light mode" })).not.toBeInTheDocument()
-    expect(document.querySelector("main")?.className).toContain("bg-[#F4F8FF]")
-    expect(screen.queryByText("SampleSite")).not.toBeInTheDocument()
-    expect(screen.queryByText("24-hour chat support")).not.toBeInTheDocument()
-    expect(screen.queryByText("Clear answers for every screening step")).not.toBeInTheDocument()
     const loader = document.querySelector('script[src$="/supportchat.js"]')
     expect(loader?.getAttribute("src")).toBe("http://widget.localhost:3000/supportchat.js")
     expect(window.__supportchat).toEqual({

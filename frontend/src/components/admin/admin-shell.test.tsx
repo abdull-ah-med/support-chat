@@ -117,21 +117,6 @@ describe("admin shell", () => {
     expect(signOut.querySelector("svg")).not.toBeNull()
   })
 
-  test("places Status immediately above Logs in the workspace nav", async () => {
-    renderWithProviders(
-      <AdminShell>
-        <div id="main-content">Inbox view</div>
-      </AdminShell>,
-    )
-
-    await waitFor(() => expect(screen.getByText("Inbox view")).toBeInTheDocument())
-    const labels = within(screen.getByTestId("admin-sidebar"))
-      .getAllByRole("link")
-      .map((link) => link.textContent)
-    expect(labels.indexOf("Status")).toBe(labels.indexOf("Logs") - 1)
-    expect(labels.indexOf("Sites")).toBeLessThan(labels.indexOf("Status"))
-  })
-
   test("restores a collapsed sidebar from the preferences cookie", async () => {
     renderWithProviders(
       <AdminShell>

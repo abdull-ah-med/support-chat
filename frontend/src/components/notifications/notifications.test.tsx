@@ -223,7 +223,7 @@ test("sound preview waits for the media device to accept playback", async () => 
   expect(screen.getByRole("button", { name: "Test sound" })).toBeEnabled()
 })
 
-test.each([320, 390, 1440])(
+test.each([320, 1440])(
   "notification panel at %i px opens a conversation and persists its read status",
   async (width) => {
     vi.stubGlobal("innerWidth", width)

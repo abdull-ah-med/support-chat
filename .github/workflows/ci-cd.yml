@@ -24,8 +24,40 @@ env:
   # GITHUB_REPOSITORY is set automatically; ssm deploy receives it as GITHUB_REPO.
 
 jobs:
+  # Decides which CI jobs are relevant. Skipped jobs (job-level `if`) report as
+  # skipped, which GitHub treats as passing for required status checks.
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        with:
+          filters: |
+            shared: &shared
+              - '.github/workflows/ci-cd.yml'
+              - 'deploy/**'
+              - 'docker-compose*.yml'
+              - '.env.example'
+            backend:
+              - *shared
+              - 'backend/**'
+            frontend:
+              - *shared
+              - 'frontend/**'
+
   backend-ci:
     name: Backend (lint + test)
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -59,6 +91,8 @@ jobs:
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           version: "0.11.28"
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
 
       - name: Sync dependencies
         run: uv sync --frozen
@@ -81,10 +115,12 @@ jobs:
           STAFF_APP_ORIGIN: http://localhost:3000
           WIDGET_ORIGIN: http://widget.localhost:3000
           MARKETING_HOST_ORIGIN: http://host.localhost:3000
-        run: uv run pytest
+        run: uv run pytest -n auto
 
   frontend-ci:
     name: Frontend (lint + typecheck + test + build)
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -122,8 +158,12 @@ jobs:
 
   deploy-dev:
     name: Deploy to EC2 (via SSM)
-    needs: [backend-ci, frontend-ci]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    needs: [changes, backend-ci, frontend-ci]
+    # always(): run even when a needed job was skipped by path filtering.
+    # !failure() && !cancelled(): but never when any needed job failed/cancelled.
+    if: >-
+      always() && !failure() && !cancelled()
+      && github.event_name == 'push' && github.ref == 'refs/heads/dev'
     runs-on: ubuntu-latest
     concurrency:
       group: deploy-dev
