@@ -45,6 +45,9 @@ export type SiteRecord = {
   widget_installed: boolean | null
   widget_checked_at: string | null
   contact_info?: string[]
+  assistant_scope?: string
+  handoff_topics?: string[]
+  primary_language?: string
 }
 
 export type HandoffOutcomeRecord = {

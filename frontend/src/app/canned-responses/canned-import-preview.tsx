@@ -8,7 +8,6 @@ import {
   rowKey,
   isHardSkip,
   livechatGroupName,
-  livechatGroupWebsite,
   groupedImportGroups,
   updateIds,
   unmappedGroupLabel,
@@ -72,11 +71,6 @@ export const PreviewBody = ({
       ) : null}
     </div>
   )
-}
-
-const groupHeading = (group: number, rows: PreviewRow[]) => {
-  const name = livechatGroupName(group, rows)
-  return `LiveChat group ${group} · ${name}`
 }
 
 const AgentDisabledPill = () => (
@@ -152,14 +146,12 @@ const UnmappedGroup = ({
   target: GroupTarget | null
   onTarget: (target: GroupTarget) => void
 }) => {
-  const name = livechatGroupName(group, rows)
-  const website = livechatGroupWebsite(group, rows)
+  const name = livechatGroupName(group)
   const discarded = target === "discard"
   const selectValue = discarded || target == null ? null : target
   return (
     <section className="border-line bg-ice rounded-[8px] border p-3">
-      <p className="text-navy text-sm font-semibold">{groupHeading(group, rows)}</p>
-      {website ? <p className="text-mute mt-0.5 font-mono text-xs">{website}</p> : null}
+      <p className="text-navy text-sm font-semibold">{name}</p>
       <p className="text-mute mt-1 text-xs">Add these to a website we host, or discard them.</p>
       <GroupMapTarget
         group={group}
@@ -170,7 +162,7 @@ const UnmappedGroup = ({
       />
       {target == null ? (
         <p className="text-ember mt-2 text-xs" role="alert">
-          {unmappedGroupLabel(group, rows)}
+          {unmappedGroupLabel(group)}
         </p>
       ) : null}
       {discarded ? (
