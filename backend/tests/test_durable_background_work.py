@@ -81,3 +81,44 @@ async def test_handoff_summary_job_is_persisted_and_claimed_once(migrated_db) ->
     assert first.summary_status == "running"
     assert first.summary_attempts == 1
     assert second is None
+
+
+async def test_handoff_summary_without_a_provider_stores_no_summary(
+    migrated_db, monkeypatch
+) -> None:
+    """Catches invented placeholder text being shown to staff as if it were a summary."""
+    import pytest
+
+    from app.services import handoff_summary
+    from app.settings import get_settings
+
+    monkeypatch.setattr(get_settings(), "anthropic_api_key", "")
+    async with session_maker()() as session:
+        site = await insert_site(session, "no-summary", "No Summary")
+        _visitor, conversation = await insert_bot_conversation(session, site)
+        handoff = await HandoffRepository(session).create(
+            conversation_id=conversation.id,
+            site_id=site.id,
+            escalation_reason="visitor_request",
+            original_question="Can a specialist help?",
+            clarification_answer=None,
+            candidate_unit_ids=[],
+            rejection_reasons=[],
+            provider_stage_timings={},
+            provider_status="ok",
+            promised_response_by=None,
+            route="live_queue",
+            snapshot_id=None,
+        )
+        with pytest.raises(handoff_summary.SummaryUnavailable):
+            await handoff_summary.generate(
+                session,
+                handoff_id=handoff.id,
+                conversation_id=conversation.id,
+                original_question="Can a specialist help?",
+                escalation_reason="visitor_request",
+            )
+        await session.refresh(handoff)
+
+    assert handoff.machine_summary == ""
+    assert handoff.machine_summary_model == ""

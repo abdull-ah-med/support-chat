@@ -64,6 +64,8 @@ os.environ.setdefault("STAFF_APP_ORIGIN", "http://localhost:3000")
 os.environ.setdefault("WIDGET_ORIGIN", "http://widget.localhost:3000")
 os.environ.setdefault("KB_INGEST_HOST_DELAY_MS", "0")
 os.environ.setdefault("INTERNAL_EVAL_ENABLED", "false")
+# Test runs inject their own provider doubles; any other environment must have real keys.
+os.environ.setdefault("APP_ENV", "test")
 
 
 def _assert_test_database() -> None:
@@ -134,6 +136,15 @@ def _truncate_tables() -> None:
         _truncate_sql = f"TRUNCATE {names} RESTART IDENTITY CASCADE" if names else ""
     if _truncate_sql:
         with _sync_engine.begin() as conn:
+            # A test that reuses a closed AsyncSession reopens a transaction nothing ends; its
+            # lock would block TRUNCATE until garbage collection. Each worker owns its database.
+            conn.execute(
+                text(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                    "WHERE datname = current_database() AND pid <> pg_backend_pid() "
+                    "AND state = 'idle in transaction'"
+                )
+            )
             conn.execute(text(_truncate_sql))
 
 
@@ -213,7 +224,15 @@ def _disable_ingest_worker(monkeypatch) -> None:
 @pytest.fixture(autouse=True)
 def _blank_anthropic_key(monkeypatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "")
-    monkeypatch.setenv("OPENAI_API_KEY", "")
+
+
+@pytest.fixture(autouse=True)
+def _embedding_provider(monkeypatch) -> None:
+    """Production has no fake embedder; here ``default_embedder()`` builds the test double."""
+    from tests.fakes import FakeOpenAIEmbedder
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-key-for-fake-embedder")
+    monkeypatch.setattr("app.services.kb_embedder.OpenAIEmbedder", FakeOpenAIEmbedder)
 
 
 @pytest.fixture
