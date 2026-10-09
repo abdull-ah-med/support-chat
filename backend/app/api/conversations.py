@@ -187,9 +187,10 @@ async def list_submissions(
     _staff: CurrentUser,
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int | None, Query(ge=1, le=50)] = None,
+    site_id: Annotated[UUID | None, Query()] = None,
 ) -> SubmissionListOut:
     service = ConversationQueries(session)
-    items, has_more = await service.list_submissions(offset, limit)
+    items, has_more = await service.list_submissions(offset, limit, site_id)
     return SubmissionListOut.model_validate({"items": items, "has_more": has_more})
 
 
@@ -294,7 +295,7 @@ async def get_conversation_handoff(
     if detail is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
     unit_ids = [UUID(item) for item in detail["candidate_unit_ids"]]
-    labels = await service.candidate_labels(unit_ids)
+    labels = await service.candidate_labels(unit_ids, UUID(str(detail["site_id"])))
     candidates = []
     rejection_by_id = {
         str(item.get("unit_id")): item.get("reason")

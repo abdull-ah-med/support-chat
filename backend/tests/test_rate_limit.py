@@ -3,8 +3,10 @@ import uuid
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import update
 
 from app.db import session_maker
+from app.models.conversation import Conversation
 from app.services.conversation_service import CommandError, ConversationService
 from tests.bot_fixtures import insert_bot_conversation
 from tests.bot_fixtures import insert_site as insert_site_async
@@ -77,6 +79,14 @@ async def test_third_new_visitor_message_adds_zero_rows(migrated_db, monkeypatch
                 uuid.UUID(client_id),
                 body,
             )
+            # This test is about the submit budget, not the assistant: no reply is generated,
+            # so release the turn the message armed (a pending one makes the chat busy).
+            await session.execute(
+                update(Conversation)
+                .where(Conversation.id == conversation_id)
+                .values(active_generation_id=None)
+            )
+            await session.commit()
 
     await send("10000000-0000-4000-8000-000000000001", "first")
     await send("10000000-0000-4000-8000-000000000002", "second")

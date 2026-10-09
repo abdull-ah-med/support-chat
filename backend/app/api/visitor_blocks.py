@@ -1,7 +1,8 @@
 from datetime import datetime
+from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict
 
 from app.chat.connection_manager import connection_manager
@@ -67,8 +68,10 @@ def _out(block: VisitorBlock, site_name: str, created_by_name: str) -> VisitorBl
 
 
 @router.get("/api/visitor-blocks", response_model=VisitorBlockListOut)
-async def list_visitor_blocks(session: SessionDep, _staff: CurrentUser) -> VisitorBlockListOut:
-    rows = await VisitorBlockService(session).list_blocks()
+async def list_visitor_blocks(
+    session: SessionDep, _staff: CurrentUser, site_id: Annotated[UUID | None, Query()] = None
+) -> VisitorBlockListOut:
+    rows = await VisitorBlockService(session).list_blocks(site_id)
     return VisitorBlockListOut(
         items=[
             _out(block, site_name, created_by_name) for block, site_name, created_by_name in rows

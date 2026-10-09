@@ -33,8 +33,8 @@ class VisitorBlockService:
         self._sites = SiteRepository(session)
         self._conversations = ConversationRepository(session)
 
-    async def list_blocks(self) -> list[tuple[VisitorBlock, str, str]]:
-        return await self._blocks.list_with_names()
+    async def list_blocks(self, site_id: UUID | None = None) -> list[tuple[VisitorBlock, str, str]]:
+        return await self._blocks.list_with_names(site_id)
 
     async def create(
         self,

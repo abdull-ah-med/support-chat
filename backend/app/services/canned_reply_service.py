@@ -10,7 +10,6 @@ from app.models.site import Site
 from app.models.user import User
 from app.repositories.canned_import_repo import CannedImportRepository
 from app.repositories.canned_reply_repo import CannedReplyRepository
-from app.repositories.site_repo import SiteRepository
 from app.services.canned_bot import embed_replies
 from app.services.canned_import import (
     BODY_MAX,
@@ -64,7 +63,6 @@ class CannedReplyService:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
         self._replies = CannedReplyRepository(session)
-        self._sites = SiteRepository(session)
 
     async def list_effective(self, site_id: UUID) -> list[CannedReply]:
         await self._require_site(site_id)
@@ -298,9 +296,6 @@ class CannedReplyService:
             parsed = parse_livechat_csv(raw)
         except CannedCsvError as exc:
             raise CannedReplyError("invalid_csv") from exc
-        sites = await self._sites.list_all()
-        sites_by_key = {site.key: site.id for site in sites}
-        sites_by_name = {site.name.casefold(): site.id for site in sites}
         existing = [
             ExistingCanned(
                 id=row.id,
@@ -317,8 +312,6 @@ class CannedReplyService:
         ]
         return plan_import(
             parsed,
-            sites_by_key=sites_by_key,
-            sites_by_name=sites_by_name,
             existing=existing,
             remap_groups=remap_groups,
             discard_ids=discard_ids,

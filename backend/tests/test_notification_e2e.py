@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import pytest
 
+from app.chat.outcome_copy import WAITING_LINE
 from tests.notification_e2e_helpers import (
     NotificationStack,
     drained,
@@ -258,7 +259,7 @@ def test_handoff_line_busy_prompt_and_wait_choices_reach_visitor_over_real_webso
             client_message_id=str(uuid4()),
             body="I need to talk to a person",
         )
-        line = receive(visitor, "message", body="A specialist will join this chat shortly.")
+        line = receive(visitor, "message", body=WAITING_LINE)
         assert line["role"] == "system" and line["system_reason"] == "visitor_request"
         receive(visitor, "state", state="queued")
         # Advance durable queue age, then let the real idle sweep/socket watch act.
