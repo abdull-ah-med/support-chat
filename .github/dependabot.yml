@@ -1,0 +1,51 @@
+# INF-8: keep dependencies, base images and pinned action SHAs current. Pull requests only;
+# nothing is merged automatically. Security updates are enabled separately in repo settings.
+version: 2
+updates:
+  - package-ecosystem: uv
+    directory: /backend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      python-minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directories:
+      - /backend
+      - /frontend
+    schedule:
+      interval: weekly
+    ignore:
+      - dependency-name: "redis"
+        update-types: ["version-update:semver-major"]
+
+  # Digest-pinned postgres/redis images in the compose files.
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+    # PostgreSQL major upgrades require a deliberate data migration, never an image-only bump.
+    ignore:
+      - dependency-name: "pgvector/pgvector"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "postgres"
+        update-types: ["version-update:semver-major"]
+      # Redis majors change persistence/ACL/TLS behaviour; upgrade deliberately, not via bump.
+      - dependency-name: "redis"
+        update-types: ["version-update:semver-major"]
