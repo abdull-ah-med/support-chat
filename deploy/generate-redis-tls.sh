@@ -4,6 +4,11 @@ set -eu
 TLS_DIR="${REDIS_TLS_DIR:-./deploy/redis-tls}"
 
 if [ -f "$TLS_DIR/ca.crt" ] && [ -f "$TLS_DIR/redis.crt" ] && [ -f "$TLS_DIR/redis.key" ]; then
+  # The Redis entrypoint copies the key as root, so the host copy no longer needs to be world-readable.
+  chmod 600 "$TLS_DIR/redis.key"
+  if [ -e "$TLS_DIR/ca.key" ]; then
+    echo "WARNING: $TLS_DIR/ca.key is still on this host. Move it to offline storage: anyone holding it can mint certs the backend trusts." >&2
+  fi
   echo "Redis TLS material already exists in $TLS_DIR"
   exit 0
 fi
@@ -37,8 +42,14 @@ openssl x509 -req -sha256 \
   -out "$TLS_DIR/redis.crt" \
   -days 825
 
-# The directory is mode 700 from umask, so only the deployment owner can read
-# the key on the host. The read-only bind exposes it only inside the Redis container.
+# The CA key has done its only job (signing this one server cert). Do not leave it on the host.
+# Rotating the certificate means regenerating the whole directory, which this script supports.
+rm -f "$TLS_DIR/ca.key" "$TLS_DIR/ca.srl" "$TLS_DIR/redis.csr"
+
+# The directory is mode 700 from umask, so only the deployment owner can read it on the host.
+# The Redis container's entrypoint runs as root, copies redis.key to a 0600 file owned by the
+# redis uid, and drops privileges; the key itself therefore stays 0600 here. Certificates are public.
 chmod 700 "$TLS_DIR"
-chmod 644 "$TLS_DIR/ca.crt" "$TLS_DIR/redis.crt" "$TLS_DIR/redis.key"
+chmod 644 "$TLS_DIR/ca.crt" "$TLS_DIR/redis.crt"
+chmod 600 "$TLS_DIR/redis.key"
 echo "Generated Redis TLS material in $TLS_DIR"
