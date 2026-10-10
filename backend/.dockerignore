@@ -16,3 +16,17 @@ docs/
 tests/
 *.md
 .pytest_cache
+
+# Development-only tooling and eval output; retain app, alembic, docker and runtime scripts.
+app/devtools/
+**/.cache/
+**/.ruff_cache/
+**/.mypy_cache/
+**/.pytest_cache/
+**/*.egg-info/
+evals/
+eval-artifacts/
+eval_results/
+artifacts/
+coverage.xml
+.DS_Store
