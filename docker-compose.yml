@@ -70,6 +70,8 @@ services:
       - path: ./backend/.env
         required: false
     environment:
+      # Explicit per service: the API never runs the background workers, the worker service does.
+      # (The settings default is false, so nothing starts workers unless a service opts in.)
       ENABLE_BACKGROUND_WORKERS: "false"
       # Compose DNS overrides host-local URLs from backend/.env.
       DATABASE_URL: postgresql+asyncpg://${APP_DB_USER:-chat_app}:${APP_DB_PASSWORD:-local-chat-app}@postgres:5432/${POSTGRES_DB:-support_chat}
@@ -116,7 +118,11 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     command: ["sh", "/app/docker/migrate.sh"]
+    # The image's HEALTHCHECK probes the API port; this one-shot container never serves it.
+    healthcheck:
+      disable: true
     environment:
+      ENABLE_BACKGROUND_WORKERS: "false"
       DATABASE_URL: postgresql+asyncpg://${MIGRATION_DB_USER:-chat_migrator}:${MIGRATION_DB_PASSWORD:-local-chat-migrator}@postgres:5432/${POSTGRES_DB:-support_chat}
       MIGRATION_DATABASE_URL: postgresql+asyncpg://${MIGRATION_DB_USER:-chat_migrator}:${MIGRATION_DB_PASSWORD:-local-chat-migrator}@postgres:5432/${POSTGRES_DB:-support_chat}
       REDIS_URL: redis://:${REDIS_PASSWORD:-local-dev-redis}@redis:6379/0

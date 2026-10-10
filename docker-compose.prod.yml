@@ -7,6 +7,18 @@
 #
 # Host nginx (+ sslip.io / certbot) terminates TLS and proxies to loopback.
 # The overlay forces APP_ENV=production. Redis is TLS-only on the private network.
+#
+# Hardening applied here (the base file stays convenient for local use):
+#   - app/Redis/provision services: no-new-privileges, cap_drop ALL (+ the few caps an image needs), and
+#     memory / pid limits (INF-2, INF-12). Defaults assume one 16 GiB host; lower them via the
+#     *_MEM_LIMIT variables in the root .env for a smaller instance (a mem_limit above host RAM
+#     is harmless). There are deliberately NO `cpus:` limits: Docker refuses to start a container
+#     whose cpus exceeds the host's CPU count and the instance size is not fixed.
+#   - no local-development fallbacks: every credential is `${VAR:?}` (INF-3).
+#   - the compose network is NOT pinned (recreating it on an existing host is disruptive).
+#     Keep an explicit gateway /32 in backend/.env.prod; inspect the Docker network.
+#     HEAD healthchecks/exec cannot parse auto because they bypass the entrypoint.
+#   - provision / Redis images are pinned; Postgres stays exactly as deployed at HEAD.
 
 # Docker's default json-file driver never rotates; cap each container's logs.
 x-logging: &default-logging
@@ -16,6 +28,7 @@ x-logging: &default-logging
     max-file: "3"
 
 services:
+  # Postgres hardening (including stop_grace_period: 60s) is deferred to a later deploy.
   postgres:
     restart: unless-stopped
     logging: *default-logging
@@ -25,13 +38,43 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
 
+  db-provision:
+    image: pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
+    logging: *default-logging
+    # INF-3: the base file falls back to local-* passwords. Never reachable in production:
+    # a missing value must fail the deploy instead of running ALTER ROLE ... PASSWORD with a default.
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      APP_DB_USER: ${APP_DB_USER:?APP_DB_USER is required}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?APP_DB_PASSWORD is required}
+      MIGRATION_DB_USER: ${MIGRATION_DB_USER:?MIGRATION_DB_USER is required}
+      MIGRATION_DB_PASSWORD: ${MIGRATION_DB_PASSWORD:?MIGRATION_DB_PASSWORD is required}
+    mem_limit: 256m
+    pids_limit: 64
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+
   redis:
+    image: redis:7-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
     logging: *default-logging
     restart: unless-stopped
     ports: !reset []
     environment:
       REDIS_APP_PASSWORD: ${REDIS_APP_PASSWORD:?REDIS_APP_PASSWORD is required}
       REDIS_ADMIN_PASSWORD: ${REDIS_ADMIN_PASSWORD:?REDIS_ADMIN_PASSWORD is required}
+      # SEC-2: Redis' own ceiling; the container limit below leaves room for AOF rewrite and buffers.
+      REDIS_MAXMEMORY: ${REDIS_MAXMEMORY:-512mb}
+    mem_limit: ${REDIS_MEM_LIMIT:-1g}
+    pids_limit: 128
+    security_opt:
+      - no-new-privileges:true
+    # The entrypoint runs as root only to copy the TLS key / chown data, then setpriv-drops to redis.
+    # DAC_READ_SEARCH lets it read a 0600 host-owned redis.key through the read-only bind mount.
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "SETGID", "SETUID", "DAC_READ_SEARCH"]
     command: ["sh", "/usr/local/bin/redis-secure-entrypoint.sh"]
     volumes: !override
       - redis_data:/data
@@ -58,6 +101,8 @@ services:
       - ${REDIS_TLS_DIR:-./deploy/redis-tls}/ca.crt:/run/secrets/redis-ca.crt:ro
     ports: !override
       - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
+    mem_limit: ${BACKEND_MEM_LIMIT:-2g}
+    pids_limit: 512
     cap_drop: ["ALL"]
     security_opt:
       - no-new-privileges:true
@@ -68,10 +113,16 @@ services:
       - ${BACKEND_ENV_FILE:-./backend/.env.prod}
     environment: !override
       APP_ENV: production
+      ENABLE_BACKGROUND_WORKERS: "false"
       DATABASE_URL: postgresql+asyncpg://${MIGRATION_DB_USER:?MIGRATION_DB_USER is required}:${MIGRATION_DB_PASSWORD:?MIGRATION_DB_PASSWORD is required}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required}
       MIGRATION_DATABASE_URL: postgresql+asyncpg://${MIGRATION_DB_USER:?MIGRATION_DB_USER is required}:${MIGRATION_DB_PASSWORD:?MIGRATION_DB_PASSWORD is required}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required}
     volumes:
       - ${REDIS_TLS_DIR:-./deploy/redis-tls}/ca.crt:/run/secrets/redis-ca.crt:ro
+    mem_limit: 1g
+    pids_limit: 128
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
 
   worker:
     logging: *default-logging
@@ -88,6 +139,10 @@ services:
     security_opt:
       - no-new-privileges:true
     shm_size: 1gb
+    # Chromium crawls arbitrary URLs on this host: bound it so one hostile page cannot starve
+    # Postgres or Redis. /dev/shm (shm_size) is charged against the memory limit.
+    mem_limit: ${WORKER_MEM_LIMIT:-4g}
+    pids_limit: 1024
 
   frontend:
     logging: *default-logging
@@ -105,3 +160,8 @@ services:
         NEXT_PUBLIC_DEMO_PUBLIC_KEY: ${NEXT_PUBLIC_DEMO_PUBLIC_KEY:-}
     ports: !override
       - "127.0.0.1:${FRONTEND_PORT:-3000}:3000"
+    mem_limit: ${FRONTEND_MEM_LIMIT:-1g}
+    pids_limit: 256
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
