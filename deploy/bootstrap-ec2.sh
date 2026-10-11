@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 # EC2 one-time bootstrap (run on support-chat-dev after cloning the repo).
 # All values come from environment / prompts — nothing sensitive is committed.
 #
@@ -63,13 +64,22 @@ require_env_value .env NEXT_PUBLIC_STAFF_APP_ORIGIN "https://${STAFF_HOST}"
 require_env_value .env NEXT_PUBLIC_WIDGET_ORIGIN "https://${WIDGET_HOST}"
 require_env_value .env NEXT_PUBLIC_MARKETING_HOST_ORIGIN "https://${MARKETING_HOST}"
 
+# Only one explicit gateway /32 for now. auto comes once settings/healthchecks
+# support it; those entry points bypass backend/docker/entrypoint.sh.
+TRUSTED_PROXY_VALUE="$(env_value backend/.env.prod TRUSTED_PROXY_CIDRS)"
+python3 - "$TRUSTED_PROXY_VALUE" <<'PY_PROXY'
+import ipaddress, sys
+try:
+    value = ipaddress.IPv4Network(sys.argv[1])
+    assert value.prefixlen == 32
+except (ValueError, AssertionError):
+    sys.exit("backend/.env.prod requires a single gateway /32; check docker network inspect")
+PY_PROXY
+
 REDIS_TLS_DIR="${REDIS_TLS_DIR:-./deploy/redis-tls}" deploy/generate-redis-tls.sh
 
-sed \
-  -e "s/__MARKETING_HOST__/${MARKETING_HOST}/g" \
-  -e "s/__STAFF_HOST__/${STAFF_HOST}/g" \
-  -e "s/__WIDGET_HOST__/${WIDGET_HOST}/g" \
-  deploy/nginx.conf.template \
+# Initial bootstrap is HTTP-only until certbot provisions the combined certificate.
+python3 deploy/render-nginx.py --http-only --hosts "$STAFF_HOST" "$WIDGET_HOST" "$MARKETING_HOST" \
   | sudo tee "$NGINX_CONF_DEST" > /dev/null
 sudo nginx -t
 sudo systemctl reload nginx

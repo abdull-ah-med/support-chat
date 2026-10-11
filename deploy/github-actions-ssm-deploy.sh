@@ -4,7 +4,7 @@
 # Required env:
 #   INSTANCE_ID, DEPLOY_SHA, GITHUB_TOKEN, REPO_DIR, GITHUB_REPO, BRANCH
 # Optional:
-#   SSM_POLL_ITERATIONS (default 180), SSM_POLL_INTERVAL_SECONDS (default 10),
+#   SSM_POLL_ITERATIONS (default 350), SSM_POLL_INTERVAL_SECONDS (default 10),
 #   COMPOSE_FILE, COMPOSE_PROD_FILE, COMPOSE_APP_SERVICES, POSTGRES_VOLUME_FILTER,
 #   AWS_REGION (passed through to aws cli if set)
 set -euo pipefail
@@ -15,7 +15,7 @@ GITHUB_TOKEN="${GITHUB_TOKEN:?GITHUB_TOKEN required}"
 REPO_DIR="${REPO_DIR:?REPO_DIR required}"
 GITHUB_REPO="${GITHUB_REPO:?GITHUB_REPO required}"
 BRANCH="${BRANCH:?BRANCH required}"
-SSM_POLL_ITERATIONS="${SSM_POLL_ITERATIONS:-180}"
+SSM_POLL_ITERATIONS="${SSM_POLL_ITERATIONS:-350}"
 SSM_POLL_INTERVAL_SECONDS="${SSM_POLL_INTERVAL_SECONDS:-10}"
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -39,7 +39,7 @@ COMMAND_ID=$(aws ssm send-command \
   --instance-ids "$INSTANCE_ID" \
   --document-name "AWS-RunShellScript" \
   --comment "Deploy ${GITHUB_REPO} @ ${DEPLOY_SHA}" \
-  --parameters "{\"commands\":${COMMANDS_JSON}}" \
+  --parameters "{\"commands\":${COMMANDS_JSON},\"executionTimeout\":[\"3300\"]}" \
   --query "Command.CommandId" --output text)
 
 echo "SSM command: $COMMAND_ID"

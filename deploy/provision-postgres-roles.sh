@@ -10,7 +10,7 @@ set -eu
 : "${MIGRATION_DB_PASSWORD:?MIGRATION_DB_PASSWORD is required}"
 
 export PGPASSWORD="$POSTGRES_PASSWORD"
-psql \
+if ! psql \
   --host "${PGHOST:-postgres}" \
   --username "$POSTGRES_USER" \
   --dbname "$POSTGRES_DB" \
@@ -18,7 +18,7 @@ psql \
   --set app_user="$APP_DB_USER" \
   --set app_password="$APP_DB_PASSWORD" \
   --set migration_user="$MIGRATION_DB_USER" \
-  --set migration_password="$MIGRATION_DB_PASSWORD" <<'SQL'
+  --set migration_password="$MIGRATION_DB_PASSWORD" 2>/dev/null <<'SQL'
 SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', :'app_user', :'app_password')
 WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = :'app_user') \gexec
 SELECT format('ALTER ROLE %I LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION', :'app_user', :'app_password') \gexec
@@ -52,3 +52,7 @@ SELECT format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA public GRANT USAGE
 SELECT format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO %I', :'migration_user', :'app_user') \gexec
 SELECT format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA public GRANT USAGE ON TYPES TO %I', :'migration_user', :'app_user') \gexec
 SQL
+then
+  echo "Database role provisioning failed; SQL and credential details suppressed" >&2
+  exit 1
+fi

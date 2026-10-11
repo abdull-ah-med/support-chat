@@ -1,6 +1,6 @@
-#!/usr/bin/env sh
+#!/usr/bin/env bash
 # One-shot local stack: Postgres + Redis + API (migrate + seed + serve).
-set -eu
+set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 if [ ! -f .env ]; then

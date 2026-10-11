@@ -1,23 +1,58 @@
-# Three-origin edge for SupportChat on one EC2 instance. Certbot adds the
-# corresponding TLS listeners and redirects HTTP to HTTPS.
+# Three-origin edge, with TLS preserved on every deploy. Bootstrap renders HTTP-only
+# until certbot provisions certificates; deploy/render-nginx.py resolves existing lineages.
 
 map $http_upgrade $connection_upgrade {
     default upgrade;
     '' close;
 }
 
-limit_req_zone $binary_remote_addr zone=auth:10m rate=10r/m;
+# Reject with 429 (nginx defaults to 503, which looks like an outage to clients and monitors).
+limit_req_status 429;
+limit_conn_status 429;
+server_tokens off;
+
+# Credential endpoints only (/auth/login, /auth/change-password): brute-force protection.
+limit_req_zone $binary_remote_addr zone=auth_login:10m rate=10r/m;
+# Session upkeep (/auth/refresh, /auth/me, /auth/logout): every open staff tab calls these, and
+# offices share one NAT address, so this bucket is deliberately far looser than the login one.
+limit_req_zone $binary_remote_addr zone=auth_session:10m rate=120r/m;
 limit_req_zone $binary_remote_addr zone=bootstrap:10m rate=60r/m;
+# WebSockets: concurrent sockets per IP and upgrade attempts per IP (SEC-3). Offices share an
+# address, so the caps are per-IP ceilings, not per-user limits. The backend adds its own caps.
+limit_conn_zone $binary_remote_addr zone=ws_conn:10m;
+limit_req_zone $binary_remote_addr zone=ws_upgrade:10m rate=60r/m;
 
 proxy_set_header Host $host;
 proxy_set_header X-Real-IP $remote_addr;
 proxy_set_header X-Forwarded-For $remote_addr;
+proxy_set_header Forwarded "";
 proxy_set_header X-Forwarded-Proto $scheme;
+
+# Catch-all: any Host that is not one of the three origins below gets no response at all.
+# Without this, nginx serves the first server block for unknown Host headers and bare-IP scans.
+# This is the default server for ports 80 and 443. If the distribution already ships a
+# default_server (Debian/Ubuntu sites-enabled/default), remove that one: nginx rejects duplicates.
+server {
+    listen 80 default_server;
+    server_name _;
+    return 444;
+}
+
+# Port 443 default: refuse the TLS handshake for unknown SNI so no certificate is leaked.
+# Needs nginx >= 1.19.4 and no certificate.
+server {
+    listen 443 ssl default_server;
+    server_name _;
+    ssl_reject_handshake on;
+}
 
 # Marketing/demo surface: no backend, auth, staff API, or WebSocket access.
 server {
-    listen 80;
+    listen 443 ssl;
     server_name __MARKETING_HOST__;
+    ssl_certificate __MARKETING_CERT__/fullchain.pem;
+    ssl_certificate_key __MARKETING_CERT__/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
     add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
     add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()" always;
 
@@ -40,8 +75,11 @@ server {
 
 # Staff surface: staff HTML, authentication, administrative APIs, and agent socket only.
 server {
-    listen 80;
+    listen 443 ssl;
     server_name __STAFF_HOST__;
+    ssl_certificate __STAFF_CERT__/fullchain.pem;
+    ssl_certificate_key __STAFF_CERT__/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
 
     client_max_body_size 8m;
     add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
@@ -51,9 +89,21 @@ server {
         proxy_pass http://127.0.0.1:8000;
     }
 
+    location = /auth/login {
+        client_max_body_size 4k;
+        limit_req zone=auth_login burst=5 nodelay;
+        proxy_pass http://127.0.0.1:8000;
+    }
+
+    location = /auth/change-password {
+        client_max_body_size 4k;
+        limit_req zone=auth_login burst=5 nodelay;
+        proxy_pass http://127.0.0.1:8000;
+    }
+
     location ^~ /auth/ {
         client_max_body_size 4k;
-        limit_req zone=auth burst=5 nodelay;
+        limit_req zone=auth_session burst=40 nodelay;
         proxy_pass http://127.0.0.1:8000;
     }
 
@@ -70,6 +120,8 @@ server {
     }
 
     location = /ws/agent {
+        limit_conn ws_conn 20;
+        limit_req zone=ws_upgrade burst=20 nodelay;
         proxy_pass http://127.0.0.1:8000;
         proxy_http_version 1.1;
         # Location-level proxy_set_header drops the http-level Host $host.
@@ -77,6 +129,7 @@ server {
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header Forwarded "";
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
@@ -106,6 +159,13 @@ server {
     location / {
         proxy_pass http://127.0.0.1:3000;
         proxy_http_version 1.1;
+        # Any proxy_set_header here drops the http-level ones, so Next would see
+        # Host 127.0.0.1:3000 and build login redirects to it. Repeat them all.
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header Forwarded "";
+        proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
     }
@@ -113,8 +173,11 @@ server {
 
 # Public widget surface: loader, iframe, bootstrap, and visitor socket only.
 server {
-    listen 80;
+    listen 443 ssl;
     server_name __WIDGET_HOST__;
+    ssl_certificate __WIDGET_CERT__/fullchain.pem;
+    ssl_certificate_key __WIDGET_CERT__/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
 
     client_max_body_size 32k;
     add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
@@ -126,6 +189,8 @@ server {
     }
 
     location = /ws/visitor {
+        limit_conn ws_conn 30;
+        limit_req zone=ws_upgrade burst=20 nodelay;
         proxy_pass http://127.0.0.1:8000;
         proxy_http_version 1.1;
         # Location-level proxy_set_header drops the http-level Host $host.
@@ -133,6 +198,7 @@ server {
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header Forwarded "";
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
@@ -167,3 +233,11 @@ server {
         return 404;
     }
 }
+
+# BEGIN HTTPS REDIRECTS
+server {
+    listen 80;
+    server_name __MARKETING_HOST__ __STAFF_HOST__ __WIDGET_HOST__;
+    return 301 https://$host$request_uri;
+}
+# END HTTPS REDIRECTS
