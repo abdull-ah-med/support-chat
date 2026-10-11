@@ -201,6 +201,8 @@ describe("canned responses console lazy loading", () => {
     expect(within(table).getByText("#r50")).toBeInTheDocument()
     expect(within(table).queryByText("#r51")).not.toBeInTheDocument()
 
+    // Passive effects attach the observer after the table paints; scrolling earlier is a no-op.
+    await waitFor(() => expect(observerCallbacks.length).toBeGreaterThan(0))
     act(() => {
       for (const callback of observerCallbacks) {
         callback(
