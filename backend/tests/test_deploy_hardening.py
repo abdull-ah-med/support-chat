@@ -1224,9 +1224,37 @@ def test_dependabot_preserves_postgres_major_version_boundary() -> None:
     assert ignored["postgres"] == ["version-update:semver-major"]
     assert ignored["redis"] == ["version-update:semver-major"]
     docker = next(u for u in updates if u["package-ecosystem"] == "docker")
-    assert {i["dependency-name"]: i["update-types"] for i in docker["ignore"]}["redis"] == [
+    ignored_images = {i["dependency-name"]: i["update-types"] for i in docker["ignore"]}
+    assert ignored_images["redis"] == ["version-update:semver-major"]
+    # Node LTS upgrades are deliberate: runtime image, @types/node and CI move together.
+    assert ignored_images["node"] == ["version-update:semver-major"]
+    npm = next(u for u in updates if u["package-ecosystem"] == "npm")
+    assert {i["dependency-name"]: i["update-types"] for i in npm["ignore"]}["@types/node"] == [
         "version-update:semver-major"
     ]
+
+
+def test_dependabot_batches_updates_into_few_weekly_pull_requests() -> None:
+    import yaml
+
+    updates = yaml.safe_load(_read(".github/dependabot.yml"))["updates"]
+    assert {u["package-ecosystem"] for u in updates} == {
+        "uv",
+        "npm",
+        "github-actions",
+        "docker",
+        "docker-compose",
+    }
+    for update in updates:
+        name = update["package-ecosystem"]
+        assert update["schedule"]["interval"] == "weekly", name
+        assert update["open-pull-requests-limit"] == 3, name
+        assert update["cooldown"]["default-days"] == 5, name
+        groups = update["groups"]
+        assert len(groups) == 2, name  # one for minor+patch, one for majors
+        assert [g for g in groups.values() if g.get("update-types") == ["major"]], name
+        others = [g for g in groups.values() if g.get("update-types") != ["major"]]
+        assert len(others) == 1, name
 
 
 def test_ci_package_round_trips_across_docker_image_stores(tmp_path: Path) -> None:
