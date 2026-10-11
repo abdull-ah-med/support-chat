@@ -39,7 +39,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
 
   db-provision:
-    image: pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
+    image: pgvector/pgvector:pg16@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
     logging: *default-logging
     # INF-3: the base file falls back to local-* passwords. Never reachable in production:
     # a missing value must fail the deploy instead of running ALTER ROLE ... PASSWORD with a default.
@@ -58,7 +58,7 @@ services:
     cap_drop: ["ALL"]
 
   redis:
-    image: redis:7-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
+    image: redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
     logging: *default-logging
     restart: unless-stopped
     ports: !reset []
