@@ -24,11 +24,12 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
 from cryptography.x509.oid import NameOID
+from websockets.sync.client import connect
+
 from tests.conftest import TEST_DATABASE_URL
 from tests.test_push_notifications import subscription
 from tests.test_web_push_protocol import RECEIVER
 from tests.ws_helpers import STAFF_ORIGIN, WIDGET_ORIGIN
-from websockets.sync.client import connect
 
 BACKEND = Path(__file__).resolve().parents[1]
 
