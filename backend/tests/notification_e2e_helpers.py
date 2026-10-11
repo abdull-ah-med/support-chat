@@ -24,12 +24,11 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
 from cryptography.x509.oid import NameOID
-from websockets.sync.client import connect
-
 from tests.conftest import TEST_DATABASE_URL
 from tests.test_push_notifications import subscription
 from tests.test_web_push_protocol import RECEIVER
 from tests.ws_helpers import STAFF_ORIGIN, WIDGET_ORIGIN
+from websockets.sync.client import connect
 
 BACKEND = Path(__file__).resolve().parents[1]
 
@@ -88,6 +87,15 @@ def make_certificate(directory):
 
 class GatewayHandler(BaseHTTPRequestHandler):
     def do_POST(self):
+        with self.server.guard:
+            self.server.in_flight += 1
+        try:
+            self.receive_push()
+        finally:
+            with self.server.guard:
+                self.server.in_flight -= 1
+
+    def receive_push(self):
         body = self.rfile.read(int(self.headers["Content-Length"]))
         result = subprocess.run(
             [self.server.node, "-e", RECEIVER],
@@ -229,6 +237,7 @@ class PushGateway:
         self.server.node = shutil.which("node")
         assert self.server.node, "Node is required for independent push decryption"
         self.server.records, self.server.errors, self.server.statuses = [], [], {}
+        self.server.in_flight = 0
         self.server.guard = threading.Lock()
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(self.cert, key)
@@ -243,6 +252,16 @@ class PushGateway:
     def respond(self, device, *statuses):
         with self.server.guard:
             self.server.statuses[f"/fcm/send/{device}"] = deque(statuses)
+
+    def settle(self, timeout=15):
+        """Wait for requests already accepted (Node decrypts each one) to be recorded."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self.server.guard:
+                if self.server.in_flight == 0:
+                    return
+            time.sleep(0.02)
+        raise AssertionError("Push gateway still has requests in flight")
 
     def received(self, *, accepted=True):
         with self.server.guard:
@@ -347,11 +366,17 @@ class NotificationStack:
         assert response.status_code == 200
 
     def start_worker(self):
-        worker = self.launch(
-            [sys.executable, "tests/notification_worker_process.py"],
-            self.gateway.cert.parent / f"worker-{len(self.logs)}.log",
-        )
+        log_path = self.gateway.cert.parent / f"worker-{len(self.logs)}.log"
+        worker = self.launch([sys.executable, "tests/notification_worker_process.py"], log_path)
         self.workers.append(worker)
+
+        def started():
+            assert worker.poll() is None, "E2E push worker exited before starting"
+            assert "PUSH_WORKER_STARTED" in log_path.read_text()
+
+        # A cold interpreter (no bytecode cache, busy CI host) can take longer to import the
+        # app than a delivery is allowed to take: wait here so later timeouts measure delivery.
+        eventually(started, timeout=60)
         return worker
 
     @staticmethod
@@ -432,6 +457,7 @@ class NotificationStack:
         for worker in self.workers:
             self.stop_process(worker)
         self.workers.clear()
+        self.gateway.settle()  # a request the stopped worker sent must not land in the next test
         with self.gateway.server.guard:
             self.gateway.server.records.clear()
             self.gateway.server.errors.clear()
