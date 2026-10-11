@@ -1,6 +1,7 @@
 from uuid import UUID
 
 from sqlalchemy import case, or_, select
+from sqlalchemy.dialects.postgresql import distinct_on
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.kb_snapshot import KbSnapshot
@@ -51,7 +52,7 @@ class KbSnapshotRepository:
         latest_ids = (
             select(KbSnapshot.id)
             .where(KbSnapshot.source_id.in_(source_ids))
-            .distinct(KbSnapshot.source_id)
+            .ext(distinct_on(KbSnapshot.source_id))
             .order_by(KbSnapshot.source_id, KbSnapshot.created_at.desc(), KbSnapshot.id.desc())
         )
         result = await self._session.execute(

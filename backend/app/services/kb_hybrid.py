@@ -7,6 +7,7 @@ from uuid import UUID
 
 import structlog
 from sqlalchemy import func, literal_column, select, text
+from sqlalchemy.dialects.postgresql import distinct_on
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chat.display_citations import visitor_citation_url
@@ -607,7 +608,7 @@ class HybridKbSearch:
             others = await self._session.execute(
                 _eligible_join(select(KbChunk.id))
                 .where(*_eligible(site_id), KbPage.url != KbSource.start_url)
-                .distinct(KbChunk.page_id)
+                .ext(distinct_on(KbChunk.page_id))
                 .order_by(KbChunk.page_id, KbChunk.ordinal, KbChunk.id)
                 .limit(FTS_LIMIT)
             )

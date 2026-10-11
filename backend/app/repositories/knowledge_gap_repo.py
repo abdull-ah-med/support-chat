@@ -3,6 +3,7 @@ from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import and_, distinct, false, func, or_, select
+from sqlalchemy.dialects.postgresql import distinct_on
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.knowledge_gap import KnowledgeGap, KnowledgeGapHit
@@ -184,7 +185,9 @@ class KnowledgeGapRepository:
 
     async def gap_ids_for_conversation(self, conversation_id: UUID) -> list[UUID]:
         result = await self._session.execute(
-            select(distinct(KnowledgeGapHit.gap_id)).where(
+            select(KnowledgeGapHit.gap_id)
+            .distinct()
+            .where(
                 KnowledgeGapHit.conversation_id == conversation_id,
                 KnowledgeGapHit.gap_id.is_not(None),
             )
@@ -219,7 +222,7 @@ class KnowledgeGapRepository:
                 ),
             )
             .where(KnowledgeGapHit.gap_id == gap_id, Message.role == "agent")
-            .distinct(Message.conversation_id)
+            .ext(distinct_on(Message.conversation_id))
             .order_by(Message.conversation_id, func.length(Message.body).desc(), Message.id.desc())
         )
         newest_first = sorted(result.all(), key=lambda row: row[0], reverse=True)
