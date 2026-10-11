@@ -353,7 +353,7 @@ def test_workflows_default_to_read_only_token_and_scope_oidc_to_the_deploy_job()
 def test_ci_audits_dependencies_and_dependabot_is_configured() -> None:
     ci = _read(".github/workflows/ci-cd.yml")
     assert "pip-audit" in ci
-    assert "npm audit --audit-level=high" in ci
+    assert "npm audit --omit=dev --audit-level=high" in ci
     dependabot = _read(".github/dependabot.yml")
     for ecosystem in ("uv", "npm", "github-actions", "docker", "docker-compose"):
         assert f"package-ecosystem: {ecosystem}" in dependabot
