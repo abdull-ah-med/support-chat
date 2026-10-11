@@ -130,24 +130,24 @@ const committedDecisions = (fetchMock: {
 const prompt = (group: number) =>
   `Choose a website for LiveChat group ${group}, or discard those responses.`
 
+const stubPreview = (rows: unknown[], commit = { created: 1, updated: 0, skipped: 0 }) => {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+    const url = String(input)
+    if (url === "/api/canned-replies/import/preview") {
+      return jsonResponse({ created: 0, updated: 0, skipped: 0, rows })
+    }
+    if (url === "/api/canned-replies/import") return jsonResponse(commit)
+    return jsonResponse({ detail: "missing" }, 404)
+  })
+  vi.stubGlobal("fetch", fetchMock)
+  return fetchMock
+}
+
 describe("canned import preview decisions", () => {
   beforeEach(() => {
     setAccessToken("staff-token")
     vi.unstubAllGlobals()
   })
-
-  const stubPreview = (rows: unknown[], commit = { created: 1, updated: 0, skipped: 0 }) => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
-      const url = String(input)
-      if (url === "/api/canned-replies/import/preview") {
-        return jsonResponse({ created: 0, updated: 0, skipped: 0, rows })
-      }
-      if (url === "/api/canned-replies/import") return jsonResponse(commit)
-      return jsonResponse({ detail: "missing" }, 404)
-    })
-    vi.stubGlobal("fetch", fetchMock)
-    return fetchMock
-  }
 
   test("offers an unmapped group every website or discard instead of hiding the copy", async () => {
     stubPreview([

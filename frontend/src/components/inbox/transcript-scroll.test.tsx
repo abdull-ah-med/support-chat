@@ -50,12 +50,12 @@ const installViewportLayout = (viewport: HTMLElement) => {
       },
     },
   })
-  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(
-    function (this: HTMLElement) {
-      const index = rows().indexOf(this)
-      return new DOMRect(0, index < 0 ? 0 : index * 100 - top, 320, 100)
-    },
-  )
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (
+    this: HTMLElement,
+  ) {
+    const index = rows().indexOf(this)
+    return new DOMRect(0, index < 0 ? 0 : index * 100 - top, 320, 100)
+  })
 }
 
 afterEach(() => vi.restoreAllMocks())

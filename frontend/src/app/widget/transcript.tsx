@@ -166,6 +166,20 @@ const useIdleWarning = (
   return visible
 }
 
+const CLOCK_TICK_MS = 60_000
+
+// Day markers compare against "now". Read the clock outside render so the feed stays pure.
+const useFeedClock = () => {
+  const [now, setNow] = useState(() => new Date())
+  useEffect(() => {
+    const refresh = () => setNow(new Date())
+    refresh()
+    const timer = window.setInterval(refresh, CLOCK_TICK_MS)
+    return () => window.clearInterval(timer)
+  }, [])
+  return now
+}
+
 const isStaffLine = (line: TranscriptLine) =>
   line.role === "agent" ||
   line.role === "admin" ||
@@ -632,11 +646,12 @@ export const Transcript = ({
   conversationState = null,
 }: TranscriptProps) => {
   const showIdleWarning = useIdleWarning(conversationState, lines)
+  const now = useFeedClock()
   const surface = transcriptSurface()
   if (isEmptyTranscript(lines, typing, notice, logLabel)) {
     return <div aria-live="polite" className={`min-h-0 flex-1 ${surface}`} />
   }
-  const feed = buildFeed(lines, new Date())
+  const feed = buildFeed(lines, now)
   return (
     <MessageScrollerProvider autoScroll={autoFollow} defaultScrollPosition="end">
       <MessageScroller className={`min-h-0 flex-1 ${surface} ${muted ? "opacity-90" : ""}`}>

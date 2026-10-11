@@ -42,29 +42,28 @@ const ERROR_CLASSES = new Set([
 export const safeClientErrorMessage = (value: unknown, fallback: string): string =>
   value instanceof Error && ERROR_CLASSES.has(value.name) ? value.name : fallback
 
+const onWindowError = (event: ErrorEvent) => {
+  void reportClientLog({
+    event: "ui_window_error",
+    error_class: safeClientErrorMessage(event.error, "Error"),
+    line: event.lineno,
+    column: event.colno,
+  })
+}
+
+const onUnhandledRejection = (event: PromiseRejectionEvent) => {
+  void reportClientLog({
+    event: "ui_unhandled_rejection",
+    error_class: safeClientErrorMessage(event.reason, "UnhandledRejection"),
+  })
+}
+
 export const installClientErrorReporting = () => {
-  const onError = (event: ErrorEvent) => {
-    void reportClientLog({
-      event: "ui_window_error",
-      error_class: safeClientErrorMessage(event.error, "Error"),
-      line: event.lineno,
-      column: event.colno,
-    })
-  }
-
-  const onRejection = (event: PromiseRejectionEvent) => {
-    const reason = event.reason
-    void reportClientLog({
-      event: "ui_unhandled_rejection",
-      error_class: safeClientErrorMessage(reason, "UnhandledRejection"),
-    })
-  }
-
-  window.addEventListener("error", onError)
-  window.addEventListener("unhandledrejection", onRejection)
+  window.addEventListener("error", onWindowError)
+  window.addEventListener("unhandledrejection", onUnhandledRejection)
   return () => {
-    window.removeEventListener("error", onError)
-    window.removeEventListener("unhandledrejection", onRejection)
+    window.removeEventListener("error", onWindowError)
+    window.removeEventListener("unhandledrejection", onUnhandledRejection)
   }
 }
 
