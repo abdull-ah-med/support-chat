@@ -1,76 +1,70 @@
-# SupportChat
+# Support Chat
 
-SupportChat is an embeddable live-chat product for Sample Services marketing sites (SampleSite, Verification Checks, and related properties). Visitors chat through a third-party widget on the host page. A grounded bot answers from a per-site knowledge base. Staff join from an admin inbox when a conversation needs a human.
+An embeddable live-chat platform with a grounded support bot and a staff inbox.
 
-The stack is a FastAPI backend, Next.js staff app and widget surfaces, PostgreSQL (with pgvector), and Redis for pub/sub and rate limiting.
+Visitors chat with a widget that is dropped into any website with a single script tag. A bot answers from a per-site knowledge base and cites its sources. When a conversation needs a person, staff pick it up from an admin inbox and the bot steps aside.
+
+## Stack
+
+| Layer | Technology |
+|-------|------------|
+| API and WebSockets | FastAPI on Python 3.12, managed with [uv](https://docs.astral.sh/uv/) |
+| Staff app and widget | Next.js 16, React 19, TypeScript |
+| Database | PostgreSQL 16 with pgvector, migrated with Alembic |
+| Cache, pub/sub, rate limits | Redis 7 |
+| Bot generation | Anthropic API |
+| Embeddings | OpenAI API |
+| Packaging | Docker Compose |
 
 ## Repository layout
 
 ```
-backend/          FastAPI API, WebSockets, KB ingest workers, Alembic migrations
-frontend/         Next.js 16 app (staff admin, widget iframe, embed loader)
-deploy/           EC2 bootstrap, nginx template, GitHub Actions SSM deploy scripts
-docker-compose.yml          Local full stack (Postgres, Redis, API, worker, frontend)
-docker-compose.prod.yml     Production overlay (TLS Redis, split API/worker, host binding)
+backend/                     FastAPI app, WebSocket handlers, workers, Alembic migrations, tests
+frontend/                    Next.js staff app, widget iframe surface, embed loader
+deploy/                      Host bootstrap, nginx template, deploy and rollback scripts
+docker-compose.yml           Local full stack
+docker-compose.prod.yml      Production overlay (TLS Redis, split API and worker)
+.github/workflows/           CI and deploy pipelines
 ```
 
-Only `backend/`, `frontend/`, `deploy/`, `.github/`, and a small set of root files are versioned. Copy `.env.example` and `backend/.env.example` locally; never commit secrets or transcript exports.
-
-## Branch model
-
-| Branch    | Role |
-|-----------|------|
-| `dev`     | Day-to-day integration. CI runs on every push and PR. Merges here deploy to the dev EC2 instance. |
-| `staging` | Pre-production. Promote tested `dev` work here before production. |
-| `main`    | Production line. Only release-ready commits. |
-
-Typical flow: feature branch → PR into `dev` → validate on dev host → merge `dev` into `staging` → after sign-off, merge `staging` into `main`.
-
-`master` is legacy and should not receive new work.
-
-## Architecture
+## How it works
 
 ### Surfaces
 
-The backend enforces host-based surface separation:
+The backend separates three origins by host:
 
-- **Staff app** (`STAFF_APP_ORIGIN`) — agent inbox, sites, knowledge, logs, settings. Invite-only JWT auth with rotating refresh cookies and CSRF on mutating routes.
-- **Widget** (`WIDGET_ORIGIN`) — visitor chat UI loaded in a cross-origin iframe. Origin-allowlisted per `site_key`.
-- **Marketing host** (`MARKETING_HOST_ORIGIN`) — demo and marketing pages that load the embed loader.
-
-Public widget endpoints validate the caller origin against each site's allowlist. Admin APIs require an authenticated staff session.
+- **Staff app** (`STAFF_APP_ORIGIN`): inbox, sites, knowledge base, logs, settings. JWT auth with rotating refresh cookies and CSRF protection on mutating requests.
+- **Widget** (`WIDGET_ORIGIN`): the visitor chat UI, loaded in a cross-origin iframe. Callers are checked against each site's origin allowlist.
+- **Demo host** (`MARKETING_HOST_ORIGIN`): a page that loads the embed loader, used for local testing.
 
 ### Widget embed
 
-The host page loads `supportchat.js` (built from `frontend/embed-loader/`). The loader renders a launcher and opens a cross-origin iframe pointed at the widget origin. Visitor identity is scoped to `site_key` and stored in the iframe origin (with an optional first-party cookie on the host via the loader). Identity does not leak across sites.
+A host page loads `supportchat.js`, built from `frontend/embed-loader/`. The loader renders a launcher and opens the widget iframe. Visitor identity is scoped to the site key, so it does not carry across sites, and host page CSS cannot reach the transcript.
 
-Host CSS does not style the transcript; the panel is fully isolated in the iframe.
+```bash
+cd frontend && npm run build:loader
+```
 
 ### Chat runtime
 
-- Postgres stores conversations, messages, visitors, handoffs, and KB data.
+- PostgreSQL stores conversations, messages, visitors, handoffs and knowledge data.
 - WebSockets carry live transcript and state to visitors and agents.
-- Redis pub/sub fans out events across API processes.
-- When an agent joins, the bot stops generating for that conversation.
-- Background workers (separate Compose service in production) run KB ingest, idle-close, and maintenance purges.
+- Redis pub/sub fans events out across API processes.
+- When an agent joins a conversation the bot stops generating for it.
+- Background workers (a separate Compose service in production) handle knowledge ingest, idle-close, maintenance purges, location enrichment and push notifications.
 
 ### Knowledge base
 
-Sources are crawled or fetched, chunked, embedded (OpenAI), and indexed in Postgres/pgvector. The bot retrieves evidence, cites KB chunks, and refuses requests for SSN, driver license, plate, or medical details. Legacy article CRUD under `/api/sites/{id}/articles` is deprecated; use KB source APIs.
+Sources are crawled or fetched, extracted, chunked, embedded and indexed in PostgreSQL with pgvector. The bot retrieves evidence with hybrid search, validates its draft against the retrieved sources, and hands off to a person when it cannot answer. Crawl and fetch paths block SSRF targets such as private IP ranges, metadata endpoints and non-HTTP schemes.
 
-## Prerequisites
+## Getting started
+
+### Prerequisites
 
 - Docker Engine with Compose v2
-- Node.js 22 and npm (frontend development and CI parity)
-- [uv](https://docs.astral.sh/uv/) 0.11.x (backend)
-- PostgreSQL client optional; tests expect Postgres reachable on `127.0.0.1:55432` when not using Compose defaults
-
-For bot replies and KB ingest you also need:
-
-- `ANTHROPIC_API_KEY` — conversation generation
-- `OPENAI_API_KEY` — query and ingest embeddings
-
-## Local setup
+- Node.js 22 and npm
+- uv 0.11.x
+- `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` if you want bot replies and knowledge ingest
 
 ### 1. Environment files
 
@@ -79,27 +73,25 @@ cp .env.example .env
 cp backend/.env.example backend/.env
 ```
 
-Edit both files. At minimum set unique 64+ character values for `JWT_SECRET`, `WIDGET_TOKEN_SECRET`, `RATE_KEY_SECRET`, and `WIDGET_CSP_SERVICE_SECRET`. Add API keys when exercising the bot or KB pipeline.
+Set unique values of at least 64 characters for `JWT_SECRET`, `WIDGET_TOKEN_SECRET`, `RATE_KEY_SECRET` and `WIDGET_CSP_SERVICE_SECRET`. Never commit real secrets.
 
 ### 2. Full stack with Docker
-
-From the repository root:
 
 ```bash
 cd backend && ./scripts/docker_up.sh
 ```
 
-This builds and starts Postgres (port `55432`), Redis (`56379`), the API (`8000`), a background worker, and the frontend (`3000`). The API container runs Alembic migrations and seeds a default staff user on first boot.
+This builds and starts Postgres (`55432`), Redis (`56379`), the API (`8000`), a worker and the frontend (`3000`). The API container runs migrations and seeds a staff user on first boot.
 
-### 3. Host-run API (optional)
+### 3. Host-run API and frontend (optional)
 
-With Compose Postgres and Redis already up:
+With the Compose Postgres and Redis running:
 
 ```bash
 cd backend
 uv sync --frozen
 uv run alembic upgrade head
-uv run python -m scripts.seed_user   # once
+uv run python -m scripts.seed_user      # once
 uv run fastapi dev --host 0.0.0.0 --port 8000
 ```
 
@@ -109,11 +101,9 @@ npm ci
 npm run dev
 ```
 
-Point `DATABASE_URL` and `REDIS_URL` in `backend/.env` at the Compose ports (`55432` / `56379`).
+Point `DATABASE_URL` and `REDIS_URL` in `backend/.env` at the Compose ports.
 
 ### 4. Local hostnames
-
-Default origins use `localhost` subdomains for surface testing:
 
 | Variable | Default |
 |----------|---------|
@@ -121,17 +111,13 @@ Default origins use `localhost` subdomains for surface testing:
 | `WIDGET_ORIGIN` | `http://widget.localhost:3000` |
 | `MARKETING_HOST_ORIGIN` | `http://host.localhost:3000` |
 
-Map these in `/etc/hosts` or use a DNS helper if your browser requires it.
+Most browsers resolve `*.localhost` automatically. Otherwise add the hosts to `/etc/hosts`.
 
-### 5. Staff login
-
-After seeding, sign in at `/login` with the credentials created by `backend/scripts/seed_user.py` (see script for defaults in local environments).
-
-## Running tests
+## Development
 
 ### Backend
 
-Postgres database name must contain `test` (default `support_chat_test`). CI uses port `5432`; local Compose maps `55432`.
+The test database name must contain `test` (default `support_chat_test`).
 
 ```bash
 cd backend
@@ -150,13 +136,7 @@ npm test
 npm run build
 ```
 
-### CI locally
-
-```bash
-bash deploy/verify-ci-checks.sh
-```
-
-## Database migrations
+### Database migrations
 
 ```bash
 cd backend
@@ -164,53 +144,67 @@ uv run alembic upgrade head
 uv run alembic revision --autogenerate -m "describe change"
 ```
 
-Migrations live in `backend/alembic/versions/`. Production schema changes go through Alembic only.
+Migrations live in `backend/alembic/versions/`. Schema changes go through Alembic only.
 
-## Configuration reference
+## Configuration
 
-Key settings (see `backend/.env.example` for the full list):
+See `.env.example` and `backend/.env.example` for the full list. The main settings:
 
 | Variable | Purpose |
 |----------|---------|
-| `APP_ENV` | `local`, `staging`, or `production`. Production enforces secure cookies and required secrets. |
-| `ENABLE_BACKGROUND_WORKERS` | `false` on API containers, `true` on the worker service in Compose prod. |
-| `CHAT_RETENTION_DAYS` | Conversation retention window. |
-| `MESSAGE_REPLAY_LIMIT` | Max messages replayed per WebSocket catch-up batch. |
-| `TRUSTED_PROXY_CIDRS` | CIDRs allowed to set forwarded client IP headers. |
+| `APP_ENV` | `local`, `staging` or `production`. Production enforces secure cookies and required secrets. |
+| `ENABLE_BACKGROUND_WORKERS` | `false` on API containers, `true` on the worker service. |
+| `CHAT_RETENTION_DAYS` | How long conversations are kept. |
+| `TRUSTED_PROXY_CIDRS` | Proxies allowed to set forwarded client IP headers. |
+| `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` | Required outside `APP_ENV=test` for the bot and search. |
 
-Frontend build-time public URLs use the `NEXT_PUBLIC_*` variables in `.env.example`.
+Frontend build-time URLs use the `NEXT_PUBLIC_*` variables.
 
-## Production deployment
+## Deployment
 
-Dev deploys automatically from `dev` via GitHub Actions (`.github/workflows/ci-cd.yml`): backend and frontend CI, then SSM deploy to EC2 (`deploy/github-actions-ssm-deploy.sh`).
+`.github/workflows/ci-cd.yml` runs backend and frontend checks, builds images, and deploys to a host through the scripts in `deploy/`. The deploy flow includes a preflight check, a database backup before migration, a smoke test and automatic rollback. See `deploy/ROLLBACK.md` for manual recovery.
 
-First-time instance setup:
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+```
 
-1. Clone the repo on the EC2 host.
-2. Fill `.env` and `backend/.env.prod` from the `*.example` templates.
-3. Run `deploy/bootstrap-ec2.sh` with `STAFF_HOST`, `WIDGET_HOST`, `MARKETING_HOST`, and `LETSENCRYPT_EMAIL`.
-4. Start with `docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build`.
+Production runs the API and worker as separate containers, and Redis with TLS (`deploy/generate-redis-tls.sh`). To reproduce the CI checks locally:
 
-Production runs API and worker containers separately. Redis uses TLS with a mounted CA (`deploy/generate-redis-tls.sh`).
+```bash
+bash deploy/verify-ci-checks.sh
+```
 
 ## Operational scripts
 
 | Script | Purpose |
 |--------|---------|
+| `backend/scripts/seed_user.py` | Create the initial staff user |
+| `backend/scripts/generate_push_keys.py` | Generate web push VAPID keys |
 | `backend/scripts/purge_expired_chats.py` | Enforce chat retention |
 | `backend/scripts/purge_expired_logs.py` | Trim old application logs |
 | `backend/scripts/purge_expired_refresh_tokens.py` | Remove expired refresh tokens |
-| `backend/scripts/run_samplesite_eval.py` | Offline eval against golden sets |
+| `backend/scripts/run_site_eval.py` | Offline bot evaluation against golden sets |
 
-Run maintenance scripts via the worker container or a one-off `uv run` with production env loaded.
+## Branches
 
-## Security and compliance
+| Branch | Purpose |
+|--------|---------|
+| `main` | Latest integrated work. Same tip as `dev`. |
+| `dev` | Day-to-day integration branch. |
+| `staging` | Earlier pre-release snapshot. |
+| `archive/source-main` | Snapshot of the original `main` line, kept for reference. |
+| `chore/dependency-updates` | Dependency refreshes and lint configuration. |
+| `chore/deploy-pipeline-hardening` | Deploy pipeline work: CI-built images, preflight, backup, smoke test, rollback. |
+| `feat/bot-understanding-site-profiles-and-mobile-ui` | Bot understanding, site profiles and responsive consoles. |
+| `fix/flaky-canned-lazy-load-test` | Stabilises a flaky lazy-load test. |
+| `feat/staff-console-widget-redesign` | Earlier staff console and widget redesign. |
+| `feat/tenant-isolation-security-hardening` | Earlier tenant isolation and security hardening. |
+| `feat/transcript-history-websocket-hardening` | Earlier transcript history and WebSocket hardening. |
 
-- Transcripts may contain candidate and employer PII governed by FCRA/DOT policies. Do not log message bodies, prompts with visitor text, or exports in unsecured channels.
-- Widget and admin surfaces are isolated by host and `site_key`. Do not share visitor identity across SampleSite and Verification Checks sites.
-- Rate limits apply to bootstrap, visitor creation, message submit, login failures, and widget CSP endpoints.
-- KB crawl and fetch paths block SSRF targets (private IPs, metadata endpoints, file schemes).
+Branches carry the full feature set available at their point in history, so some sections above may describe functionality a given branch does not have yet.
 
-## License
+## Security notes
 
-Proprietary — Sample Services. All rights reserved.
+- Transcripts can contain personal information. Do not log message bodies, prompts that include visitor text, or exports in unsecured channels.
+- Widget and admin surfaces are isolated by host and site key. Visitor identity is never shared between sites.
+- Rate limits cover bootstrap, visitor creation, message submit, login failures and widget CSP endpoints.
