@@ -192,16 +192,8 @@ bash deploy/verify-ci-checks.sh
 | `main` | Latest integrated work. Same tip as `dev`. |
 | `dev` | Day-to-day integration branch. |
 | `staging` | Earlier pre-release snapshot. |
-| `archive/source-main` | Snapshot of the original `main` line, kept for reference. |
-| `chore/dependency-updates` | Dependency refreshes and lint configuration. |
-| `chore/deploy-pipeline-hardening` | Deploy pipeline work: CI-built images, preflight, backup, smoke test, rollback. |
-| `feat/bot-understanding-site-profiles-and-mobile-ui` | Bot understanding, site profiles and responsive consoles. |
-| `fix/flaky-canned-lazy-load-test` | Stabilises a flaky lazy-load test. |
-| `feat/staff-console-widget-redesign` | Earlier staff console and widget redesign. |
-| `feat/tenant-isolation-security-hardening` | Earlier tenant isolation and security hardening. |
-| `feat/transcript-history-websocket-hardening` | Earlier transcript history and WebSocket hardening. |
 
-Branches carry the full feature set available at their point in history, so some sections above may describe functionality a given branch does not have yet.
+`staging` predates a large amount of later work, so some sections above may describe functionality it does not have yet.
 
 ## Security notes
 
