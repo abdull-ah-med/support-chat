@@ -1,8 +1,9 @@
 # Ignore everything at the repo root. Only allowlisted trees/files are committable.
-# Plans, .cursor, .agents, docs, README stay on disk for agents.
+# Plans, .cursor, .agents, docs stay on disk.
 
 /*
 !/.gitignore
+!/README.md
 !/.pre-commit-config.yaml
 !/.env.example
 !/docker-compose.yml
