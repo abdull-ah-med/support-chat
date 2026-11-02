@@ -21,7 +21,7 @@ dependencies = [
     "trafilatura>=2.3.1",
     "httpx>=0.28.1",
     "tiktoken>=0.8.0",
-    "crawl4ai==0.9.4",
+    "crawl4ai==0.9.5",
     "defusedxml>=0.7.1",
     "cryptography>=50.0.2",
 ]
